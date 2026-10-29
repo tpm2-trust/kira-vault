@@ -34,7 +34,8 @@ sudo make install       # /usr/bin and the systemd unit
 vault#    tpm2-kira-vault init --url https://vault.example:8443 --pcrs 7   # write down the recovery key
 vault#    systemctl enable --now tpm2-kira-vault                           # and open TCP 8443
 vault#    tpm2-kira-vault token create --name db-03                        # prints the machine's command
-machine#  tpm2-kira luks enrol /dev/sda2 --password tpm --salt vault --url … --pin … --token …
+vault#    tpm2-kira-vault tls root > vault-ca.pem                       # the machines' and operators' copy, no secret
+machine#  tpm2-kira luks enrol /dev/sda2 --password tpm --salt vault --url … --pin … --token … --ca vault-ca.pem
 vault#    tpm2-kira-vault devices | requests | audit
 vault#    tpm2-kira-vault requests answer                                  # approve, deny or skip; asks a pepper
 vault#    tpm2-kira-vault device revoke db-03                              # a machine reported stolen
@@ -46,14 +47,14 @@ over the network, with the pepper of a device enrolled with one:
 ```
 vault#    tpm2-kira-vault config set operator-listen :8444    # serve stopped; or init --operator-listen :8444
 vault#    tpm2-kira-vault operator add alice                  # prints the bearer token once, and a curl example
-anywhere$ curl -k --pinnedpubkey sha256//<base64 pin> -H "Authorization: Bearer $TOKEN" https://vault.example:8444/v1/requests
-anywhere$ curl -k --pinnedpubkey sha256//<base64 pin> -H "Authorization: Bearer $TOKEN" \
+anywhere$ curl --cacert vault-ca.pem -H "Authorization: Bearer $TOKEN" https://vault.example:8444/v1/requests
+anywhere$ curl --cacert vault-ca.pem -H "Authorization: Bearer $TOKEN" \
             -d '{"pepper":"…"}' https://vault.example:8444/v1/requests/ID/approve
 ```
 
 It serves `GET /v1/requests`, `POST /v1/requests/{id}/approve` (body `{}`
 or `{"pepper":"…"}`), `POST /v1/requests/{id}/deny`, `GET /v1/devices` and
-`GET /v1/devices/{id}`, nothing else. `-k` is right: `--pinnedpubkey` is the
-check, against the vault's self-signed key.
+`GET /v1/devices/{id}`, nothing else, over TLS with the vault's own root
+(`tls root`), which machines and operators verify the vault against.
 
 `tpm2-kira-vault help` lists every command.
