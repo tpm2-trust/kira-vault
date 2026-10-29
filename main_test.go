@@ -344,3 +344,68 @@ func TestParsePCRs(t *testing.T) {
 		t.Fatalf("help: %v", err)
 	}
 }
+
+// The queue answered on the vault's CLI: 'request approve' asks a pepper
+// device's pepper and sends it with the approval; 'requests answer' goes
+// through what waits - deny, skip, approve with the pepper - and says when
+// nothing does.
+func TestCLIAnswersTheQueue(t *testing.T) {
+	useSealer(t, vaulttest.NewSealer())
+	v := initVault(t)
+	v.start()
+	defer v.stop()
+	p := v.enrolWith("db-05", true)
+	pending := func() *vaultproto.ReleaseRequest {
+		t.Helper()
+		req, res, err := p.Release(v.client())
+		if err != nil || res.Status != vaultproto.StatusPending {
+			t.Fatalf("not pending: %v %+v", err, res)
+		}
+		return req
+	}
+
+	if out, err := cli(t, "", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "No release waits") {
+		t.Fatalf("an empty queue: %v\n%s", err, out)
+	}
+
+	req := pending()
+	if _, err := cli(t, "\n", "request", "approve", req.RequestID, "--socket", v.sock); err == nil || !strings.Contains(err.Error(), "pepper") {
+		t.Fatalf("an approval without the pepper: %v", err)
+	}
+	if out, err := cli(t, "s3cret pepper\n", "request", "approve", req.RequestID, "--socket", v.sock); err != nil || !strings.Contains(out, "approved") {
+		t.Fatalf("request approve: %v\n%s", err, out)
+	}
+	res, err := v.client().Send(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReleased(t, p, res)
+	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "s3cret pepper" {
+		t.Fatalf("the pepper the CLI sent: %q %v", got, err)
+	}
+
+	// The queue, one by one: skipped stays, denied is denied, approved with
+	// the pepper is released.
+	req = pending()
+	if out, err := cli(t, "s\n", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "db-05") || !strings.Contains(out, "with a pepper") || !strings.Contains(out, "skipped") {
+		t.Fatalf("skip: %v\n%s", err, out)
+	}
+	if out, err := cli(t, "x\nd\n", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "denied") {
+		t.Fatalf("deny: %v\n%s", err, out)
+	}
+	if res, _ := v.client().Send(req); res == nil || res.Status != vaultproto.StatusDenied {
+		t.Fatalf("after the denial: %+v", res)
+	}
+	req = pending()
+	if out, err := cli(t, "a\ns3cret pepper\n", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "approved") {
+		t.Fatalf("approve: %v\n%s", err, out)
+	}
+	res, err = v.client().Send(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReleased(t, p, res)
+	if out, err := cli(t, "", "audit", "--socket", v.sock); err != nil || strings.Contains(out, "s3cret") {
+		t.Fatalf("the audit: %v\n%s", err, out)
+	}
+}

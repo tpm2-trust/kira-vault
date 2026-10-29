@@ -5,15 +5,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
@@ -80,7 +84,8 @@ func (c *adminClient) do(method, path string, in, out any) error {
 	return json.NewDecoder(rsp.Body).Decode(out)
 }
 
-func cmdAdmin(cmd string, args []string, stdout, stderr io.Writer) error {
+func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	ask := asker(stdin, stderr)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "state directory whose configured admin socket to use")
@@ -187,7 +192,10 @@ func cmdAdmin(cmd string, args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "requests":
-		if err := want(0, "requests"); err != nil {
+		if len(pos) == 1 && pos[0] == "answer" {
+			return answerQueue(c, ask, stdout)
+		}
+		if err := want(0, "requests [answer]"); err != nil {
 			return err
 		}
 		var list []server.RequestView
@@ -208,10 +216,8 @@ func cmdAdmin(cmd string, args []string, stdout, stderr io.Writer) error {
 		if pos[0] != "approve" && pos[0] != "deny" {
 			return fmt.Errorf("unknown request command %q", pos[0])
 		}
-		var q server.RequestView
-		// A device enrolled with a pepper is approved over the operator
-		// interface, which carries the pepper; the CLI does not take one.
-		if err := c.do("POST", "/v1/requests/"+esc(pos[1])+"/"+pos[0], struct{}{}, &q); err != nil {
+		q, err := decideRequest(c, ask, pos[1], pos[0] == "approve")
+		if err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Request %s of device %s: %s. The machine is answered when it asks again.\n", q.ID, q.DeviceID, q.State)
@@ -358,4 +364,117 @@ func formatEntry(line []byte) string {
 		parts = append(parts, "- "+e.Detail)
 	}
 	return strings.Join(parts, "  ")
+}
+
+// asker reads the operator's answers, one line each, from in: on a
+// terminal after a prompt on out - a secret without echo -, from a pipe as
+// they come. One reader for all of them, so that piped answers follow each
+// other.
+func asker(in io.Reader, out io.Writer) func(prompt string, secret bool) (string, error) {
+	br := bufio.NewReader(in)
+	return func(prompt string, secret bool) (string, error) {
+		if f, ok := in.(*os.File); ok {
+			fd := int(f.Fd())
+			if t, err := unix.IoctlGetTermios(fd, unix.TCGETS); err == nil {
+				fmt.Fprint(out, prompt)
+				if secret {
+					quiet := *t
+					quiet.Lflag &^= unix.ECHO
+					quiet.Lflag |= unix.ICANON | unix.ISIG
+					if err := unix.IoctlSetTermios(fd, unix.TCSETS, &quiet); err != nil {
+						return "", err
+					}
+					defer func() {
+						unix.IoctlSetTermios(fd, unix.TCSETS, t)
+						fmt.Fprintln(out)
+					}()
+				}
+			}
+		}
+		line, err := br.ReadString('\n')
+		if err != nil && !(errors.Is(err, io.EOF) && line != "") {
+			return "", fmt.Errorf("no answer: %w", err)
+		}
+		return strings.TrimRight(line, "\r\n"), nil
+	}
+}
+
+// decideRequest approves or denies one request; an approval of a device
+// enrolled with a pepper asks the pepper and sends it along.
+func decideRequest(c *adminClient, ask func(string, bool) (string, error), id string, approve bool) (server.RequestView, error) {
+	var q server.RequestView
+	if !approve {
+		err := c.do("POST", "/v1/requests/"+url.PathEscape(id)+"/deny", struct{}{}, &q)
+		return q, err
+	}
+	var list []server.RequestView
+	if err := c.do("GET", "/v1/requests", nil, &list); err != nil {
+		return q, err
+	}
+	var body any = struct{}{}
+	for _, r := range list {
+		if r.ID != id || !r.Pepper {
+			continue
+		}
+		p, err := ask(fmt.Sprintf("Pepper for %s (%s): ", r.Name, r.DeviceID), true)
+		if err != nil {
+			return q, err
+		}
+		if p == "" {
+			return q, errors.New("this device was enrolled with a pepper: an approval without it is no approval")
+		}
+		body = server.ApproveRequest{Pepper: &p}
+	}
+	err := c.do("POST", "/v1/requests/"+url.PathEscape(id)+"/approve", body, &q)
+	return q, err
+}
+
+// answerQueue goes through the releases waiting for an operator, oldest
+// first: approve, deny or skip each.
+func answerQueue(c *adminClient, ask func(string, bool) (string, error), stdout io.Writer) error {
+	var list []server.RequestView
+	if err := c.do("GET", "/v1/requests", nil, &list); err != nil {
+		return err
+	}
+	waiting := 0
+	for _, r := range list {
+		if r.State != "pending" {
+			continue
+		}
+		waiting++
+		pepper := ""
+		if r.Pepper {
+			pepper = ", with a pepper"
+		}
+		fmt.Fprintf(stdout, "Request %s: %s (%s), generation %d, from %s%s, until %s\n", r.ID, r.Name, r.DeviceID, r.Generation, r.Remote, pepper, r.Expires.Local().Format(time.TimeOnly))
+		for {
+			a, err := ask("Approve, deny or skip? [a/d/s] ", false)
+			if err != nil {
+				return err
+			}
+			switch strings.ToLower(strings.TrimSpace(a)) {
+			case "a", "approve":
+				q, err := decideRequest(c, ask, r.ID, true)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(stdout, "  %s; the machine is answered when it asks again.\n", q.State)
+			case "d", "deny":
+				q, err := decideRequest(c, ask, r.ID, false)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(stdout, "  %s.\n", q.State)
+			case "s", "skip", "":
+				fmt.Fprintln(stdout, "  skipped.")
+			default:
+				continue
+			}
+			break
+		}
+	}
+	if waiting == 0 {
+		fmt.Fprintln(stdout, "No release waits for an operator.")
+	}
+	return nil
 }

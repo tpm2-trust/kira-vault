@@ -28,7 +28,7 @@ Usage:
   tpm2-kira-vault devices
   tpm2-kira-vault device show|revoke|unrevoke|unlock DEVICE
   tpm2-kira-vault device mode DEVICE auto|approve
-  tpm2-kira-vault requests
+  tpm2-kira-vault requests [answer]
   tpm2-kira-vault request approve|deny ID
   tpm2-kira-vault audit  [--follow]
   tpm2-kira-vault operators
@@ -47,6 +47,12 @@ without a PCR policy.
 
 reseal asks for the vault recovery key shown at init, and seals every device
 key to the vault's current PCR values.
+
+requests is the queue of releases waiting for an operator; 'requests answer'
+goes through it one by one - approve, deny or skip each - and 'request
+approve ID' answers one. For a device enrolled with a pepper, the pepper is
+asked on the terminal (without echo; one line from a pipe) and sent with
+the approval.
 
 The operator interface (off unless operator-listen is set) serves
 GET /v1/requests, POST /v1/requests/{id}/approve|deny, GET /v1/devices and
@@ -87,7 +93,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "config":
 		return cmdConfig(rest, stdout, stderr)
 	case "token", "devices", "device", "requests", "request", "audit", "operators", "operator":
-		return cmdAdmin(cmd, rest, stdout, stderr)
+		return cmdAdmin(cmd, rest, stdin, stdout, stderr)
 	}
 	return fmt.Errorf("unknown command %q (tpm2-kira-vault help)", cmd)
 }
