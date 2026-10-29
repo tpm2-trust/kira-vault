@@ -1,11 +1,12 @@
 # tpm2-kira-vault
 
-The vault of [tpm2-kira](../tpm2-kira)'s `tpm+vault` keyslots. Such a keyslot
-opens with a key made from two parts: one stays in the machine's TPM, the
-other is kept here, wrapped so that only that machine's TPM opens it. At
-boot the machine's initrd asks for it, and the vault releases it only to a
-fresh TPM quote of a boot state that the machine's own signing key
-approved. The records are encrypted under keys sealed to this vault's TPM
+The vault of [tpm2-kira](../tpm2-kira)'s keyslots with the vault's salt. Such
+a keyslot's key is made from a password - held by the machine's TPM
+(unattended) or typed at the machine - and a salt kept here, wrapped so
+that only that machine's TPM opens it. At boot the machine's initrd asks
+for it, and the vault releases it only to a fresh TPM quote of a boot
+state that the machine's own signing key approved - at once, or once an
+operator approves, with a pepper if the keyslot was enrolled with one. The records are encrypted under keys sealed to this vault's TPM
 and its own PCRs.
 
 **The documentation is tpm2-kira's
@@ -33,8 +34,9 @@ sudo make install       # /usr/bin and the systemd unit
 vault#    tpm2-kira-vault init --url https://vault.example:8443 --pcrs 7   # write down the recovery key
 vault#    systemctl enable --now tpm2-kira-vault                           # and open TCP 8443
 vault#    tpm2-kira-vault token create --name db-03                        # prints the machine's command
-machine#  tpm2-kira luks enrol /dev/sda2 --mode tpm+vault --url … --pin … --token …
+machine#  tpm2-kira luks enrol /dev/sda2 --password tpm --salt vault --url … --pin … --token …
 vault#    tpm2-kira-vault devices | requests | audit
+vault#    tpm2-kira-vault requests answer                                  # approve, deny or skip; asks a pepper
 vault#    tpm2-kira-vault device revoke db-03                              # a machine reported stolen
 ```
 
