@@ -62,10 +62,10 @@ type Config struct {
 // Device is devices/<id>.json: what the vault pinned of a machine at
 // enrolment, its release state, and its keys.
 type Device struct {
-	ID    []byte `json:"device_id"`
-	Name  string `json:"name"`
-	Label string `json:"label"`
-	Mode  string `json:"mode"` // vaultproto.ModeAuto or ModeApprove
+	ID    []byte                 `json:"device_id"`
+	Name  string                 `json:"name"`
+	Label string                 `json:"label"`
+	Mode  vaultproto.ReleaseMode `json:"mode"`
 	// PepperRequired: the machine's key is derived with an operator's
 	// pepper as well, so every release needs an approval carrying it. Such
 	// a device is always in approve mode.
@@ -113,10 +113,10 @@ func (d *Device) Pinned() *vaultproto.Device {
 // Token is tokens/<sha256 of the token>.json. The token itself is not
 // kept.
 type Token struct {
-	Name    string    `json:"name"`
-	Mode    string    `json:"mode"`
-	Expires time.Time `json:"expires"`
-	Replace []byte    `json:"replace,omitempty"` // the device this token may enrol again
+	Name    string                 `json:"name"`
+	Mode    vaultproto.ReleaseMode `json:"mode"`
+	Expires time.Time              `json:"expires"`
+	Replace []byte                 `json:"replace,omitempty"` // the device this token may enrol again
 }
 
 // ErrNotFound is a device or token that is not there.

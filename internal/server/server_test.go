@@ -104,7 +104,7 @@ func (e *env) token(req server.TokenRequest) string {
 	return t.Token
 }
 
-func (e *env) machine(mode string) *vaulttest.Machine {
+func (e *env) machine(mode vaultproto.ReleaseMode) *vaulttest.Machine {
 	e.t.Helper()
 	m, err := vaulttest.NewMachine("db-03")
 	if err != nil {
@@ -114,8 +114,12 @@ func (e *env) machine(mode string) *vaulttest.Machine {
 	if err != nil {
 		e.t.Fatalf("enrol: %v", err)
 	}
-	if want := map[string]string{"": "auto"}[mode]; want == "" && res.Mode != mode || want != "" && res.Mode != want {
-		e.t.Fatalf("enrolled in mode %q", res.Mode)
+	want := mode
+	if want == 0 {
+		want = vaultproto.ModeAuto // a token without a mode
+	}
+	if res.Mode != want {
+		e.t.Fatalf("enrolled in mode %s", res.Mode)
 	}
 	return m
 }
@@ -174,7 +178,7 @@ func (e *env) auditLines() []state.Entry {
 // release returns R wrapped as it sent it: its TPM opens it.
 func TestEnrolAndRelease(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	d := e.device(m)
 	if d.Mode != vaultproto.ModeAuto || d.MinGeneration != 5 || d.Name != "db-03" || len(d.Recovery) == 0 || len(d.Sealed.PCRs) != 1 {
 		t.Fatalf("device record %+v", d)
@@ -303,7 +307,7 @@ func TestEnrolTokens(t *testing.T) {
 	if code, msg := e.adminDo("POST", "/v1/tokens", server.TokenRequest{}, nil); code != 400 || !strings.Contains(msg, "name") {
 		t.Fatalf("nameless token: %d %s", code, msg)
 	}
-	if code, _ := e.adminDo("POST", "/v1/tokens", server.TokenRequest{Name: "x", Mode: "sometimes"}, nil); code != 400 {
+	if code, _ := e.adminDo("POST", "/v1/tokens", server.TokenRequest{Name: "x", Mode: 7}, nil); code != 400 {
 		t.Fatalf("bad mode: %d", code)
 	}
 	var tr server.TokenResponse
@@ -372,7 +376,7 @@ func TestEnrolWrongProof(t *testing.T) {
 
 func TestChallengeExpiryAndReuse(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 
 	ch, err := m.Challenge(e.client)
 	if err != nil {
@@ -421,7 +425,7 @@ func TestChallengeExpiryAndReuse(t *testing.T) {
 
 func TestGenerationRollback(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
 
 	m.Gen = 7 // a reseal of the machine
@@ -437,7 +441,7 @@ func TestGenerationRollback(t *testing.T) {
 
 func TestLockAfterFailures(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	m.TPM.Extend(11, "a kernel the signing key never saw")
 	for i := 1; i <= server.MaxFailures; i++ {
 		res := e.release(m)
@@ -475,7 +479,7 @@ func TestLockAfterFailures(t *testing.T) {
 
 func TestRevoke(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	var v server.DeviceView
 	if code, _ := e.adminDo("POST", "/v1/devices/db-03/revoke", nil, &v); code != 200 || !v.Revoked {
 		t.Fatalf("revoke: %d %+v", code, v)
@@ -495,17 +499,17 @@ func TestRevoke(t *testing.T) {
 	if code, _ := e.adminDo("GET", "/v1/devices/nothing", nil, nil); code != 404 {
 		t.Fatalf("an unknown device: %d", code)
 	}
-	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: "approve"}, &v); code != 200 || v.Mode != "approve" {
+	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: vaultproto.ModeApprove}, &v); code != 200 || v.Mode != vaultproto.ModeApprove {
 		t.Fatalf("mode: %d %+v", code, v)
 	}
-	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: "never"}, nil); code != 400 {
+	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: 9}, nil); code != 400 {
 		t.Fatalf("a bad mode: %d", code)
 	}
 }
 
 func TestRateLimit(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	for i := 0; i < server.RateLimit; i++ {
 		if _, err := m.Challenge(e.client); err != nil {
 			t.Fatalf("challenge %d: %v", i, err)
@@ -607,7 +611,7 @@ func TestApproveMode(t *testing.T) {
 // against the device; reseal-like resealing makes it release again.
 func TestVaultBootStateChanged(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	e.sealer.ChangeBoot()
 	for i := 0; i < server.MaxFailures+1; i++ {
 		wantStatus(t, e.release(m), vaultproto.StatusDenied, "the vault's own boot state changed: run reseal")

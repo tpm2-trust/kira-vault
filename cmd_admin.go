@@ -86,7 +86,7 @@ func cmdAdmin(cmd string, args []string, stdout, stderr io.Writer) error {
 	dir := fs.String("dir", "", "state directory whose configured admin socket to use")
 	socket := fs.String("socket", "", "the admin socket (default "+state.DefaultAdminSocket+")")
 	name := fs.String("name", "", "token create: the machine's name")
-	mode := fs.String("mode", vaultproto.ModeAuto, "token create: auto or approve")
+	mode := fs.String("mode", vaultproto.ModeAuto.String(), "token create: auto or approve")
 	ttl := fs.Duration("ttl", server.DefaultTokenTTL, "token create: how long the token is valid")
 	replace := fs.String("replace", "", "token create: the device the token enrols again")
 	follow := fs.Bool("follow", false, "audit: keep printing new lines")
@@ -121,8 +121,12 @@ func cmdAdmin(cmd string, args []string, stdout, stderr io.Writer) error {
 		if pos[0] != "create" {
 			return fmt.Errorf("unknown token command %q", pos[0])
 		}
+		m, err := vaultproto.ParseReleaseMode(*mode)
+		if err != nil {
+			return err
+		}
 		var t server.TokenResponse
-		if err := c.do("POST", "/v1/tokens", server.TokenRequest{Name: *name, Mode: *mode, TTLSeconds: int(ttl.Seconds()), Replace: *replace}, &t); err != nil {
+		if err := c.do("POST", "/v1/tokens", server.TokenRequest{Name: *name, Mode: m, TTLSeconds: int(ttl.Seconds()), Replace: *replace}, &t); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Token for %s (mode %s), valid until %s:\n\n", t.Name, t.Mode, t.Expires.Local().Format(time.DateTime))
@@ -169,7 +173,11 @@ func cmdAdmin(cmd string, args []string, stdout, stderr io.Writer) error {
 			if err := want(3, "device mode DEVICE auto|approve"); err != nil {
 				return err
 			}
-			if err := c.do("POST", "/v1/devices/"+esc(pos[1])+"/mode", server.ModeRequest{Mode: pos[2]}, &d); err != nil {
+			m, err := vaultproto.ParseReleaseMode(pos[2])
+			if err != nil {
+				return err
+			}
+			if err := c.do("POST", "/v1/devices/"+esc(pos[1])+"/mode", server.ModeRequest{Mode: m}, &d); err != nil {
 				return err
 			}
 		default:

@@ -124,7 +124,7 @@ func TestPepper(t *testing.T) {
 	if d := e.device(m); res.Mode != vaultproto.ModeApprove || d.Mode != vaultproto.ModeApprove || !d.PepperRequired {
 		t.Fatalf("a pepper device enrolled in mode %s: %+v", res.Mode, d)
 	}
-	if code, msg := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: "auto"}, nil); code != 400 || !strings.Contains(msg, "enrolled with a pepper") {
+	if code, msg := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: vaultproto.ModeAuto}, nil); code != 400 || !strings.Contains(msg, "enrolled with a pepper") {
 		t.Fatalf("mode auto: %d %s", code, msg)
 	}
 	var v server.DeviceView
