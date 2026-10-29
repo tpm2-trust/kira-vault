@@ -249,7 +249,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 				return err
 			}
 			fmt.Fprintf(stdout, "Operator %s, token (shown this once):\n\n  %s\n\n", o.Name, o.Token)
-			fmt.Fprintf(stdout, "  pin:       %s\n  for curl:  --pinnedpubkey %s\n", o.Pin, o.CurlPin)
+			fmt.Fprintf(stdout, "  pin:       %s (the vault's root)\n  for curl:  tpm2-kira-vault tls root > vault-ca.pem, then --cacert vault-ca.pem\n", o.Pin)
 			if o.URL == "" {
 				fmt.Fprintln(stdout, "\nThe operator interface is off: tpm2-kira-vault config set operator-listen :8444, with serve stopped.")
 			} else {

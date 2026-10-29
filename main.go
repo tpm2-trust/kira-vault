@@ -24,6 +24,7 @@ Usage:
                          [--admin-socket PATH] [--operator-listen :8444]
   tpm2-kira-vault config set operator-listen ADDR|""   [--dir DIR]
   tpm2-kira-vault serve  [--dir DIR]
+  tpm2-kira-vault tls root [--dir DIR]
   tpm2-kira-vault token create --name NAME [--mode auto|approve] [--ttl 1h] [--replace DEVICE]
   tpm2-kira-vault devices
   tpm2-kira-vault device show|revoke|unrevoke|unlock DEVICE
@@ -56,8 +57,9 @@ the approval.
 
 The operator interface (off unless operator-listen is set) serves
 GET /v1/requests, POST /v1/requests/{id}/approve|deny, GET /v1/devices and
-GET /v1/devices/{id} over HTTPS with the vault's certificate, to operators
-with a bearer token from 'operator add'. A device enrolled with a pepper is
+GET /v1/devices/{id} over HTTPS with the vault's certificate - verified
+against its root ('tls root'; curl --cacert) - to operators with a bearer
+token from 'operator add'. A device enrolled with a pepper is
 approved with {"pepper":"..."}.
 `
 
@@ -92,6 +94,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return cmdReseal(rest, stdin, stdout, stderr)
 	case "config":
 		return cmdConfig(rest, stdout, stderr)
+	case "tls":
+		return cmdTLS(rest, stdout, stderr)
 	case "token", "devices", "device", "requests", "request", "audit", "operators", "operator":
 		return cmdAdmin(cmd, rest, stdin, stdout, stderr)
 	}

@@ -132,9 +132,12 @@ func (d Dir) path(parts ...string) string {
 	return filepath.Join(append([]string{d.Path}, parts...)...)
 }
 
-// TLSKeyPath and TLSCertPath are the TLS key and certificate (PEM).
-func (d Dir) TLSKeyPath() string  { return d.path("tls", "key.pem") }
-func (d Dir) TLSCertPath() string { return d.path("tls", "cert.pem") }
+// TLSKeyPath and TLSCertPath are the TLS leaf's key and certificate,
+// TLSRootPath and TLSRootKeyPath the root's that signs it (PEM).
+func (d Dir) TLSKeyPath() string     { return d.path("tls", "key.pem") }
+func (d Dir) TLSCertPath() string    { return d.path("tls", "cert.pem") }
+func (d Dir) TLSRootPath() string    { return d.path("tls", "ca.pem") }
+func (d Dir) TLSRootKeyPath() string { return d.path("tls", "ca-key.pem") }
 
 // AuditPath is the audit log.
 func (d Dir) AuditPath() string { return d.path("audit.log") }

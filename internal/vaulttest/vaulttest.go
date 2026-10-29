@@ -145,10 +145,16 @@ type Client struct {
 }
 
 // NewClient pins the vault's key as tpm2-kira does.
-func NewClient(url, pin string) *Client {
+// NewClient verifies the vault's chain against root (PEM) and then the
+// pin, as a machine does.
+func NewClient(url string, root []byte, pin string) *Client {
+	cfg, err := tlsutil.ClientConfig(url, root, pin)
+	if err != nil {
+		panic(err) // a test's root that does not parse
+	}
 	return &Client{URL: url, HTTP: &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsutil.PinnedConfig(pin)},
+		Transport: &http.Transport{TLSClientConfig: cfg},
 	}}
 }
 
@@ -262,8 +268,8 @@ type Operator struct {
 }
 
 // NewOperator pins the vault's key and sends token.
-func NewOperator(url, pin, token string) *Operator {
-	return &Operator{URL: url, Token: token, HTTP: NewClient(url, pin).HTTP}
+func NewOperator(url string, root []byte, pin, token string) *Operator {
+	return &Operator{URL: url, Token: token, HTTP: NewClient(url, root, pin).HTTP}
 }
 
 // Do sends body (raw JSON, or nothing) and returns the status and the

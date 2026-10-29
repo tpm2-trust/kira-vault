@@ -17,7 +17,6 @@ import (
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
 )
 
@@ -28,6 +27,7 @@ type vault struct {
 	sock     string
 	url      string
 	pin      string
+	root     []byte // the vault's root, as 'tls root' prints it
 	recovery string
 	stop     func()
 }
@@ -73,6 +73,11 @@ func initVault(t *testing.T, extra ...string) *vault {
 		t.Fatalf("init output:\n%s", out)
 	}
 	v.pin, v.recovery = m[1], r[1]
+	root, err := cli(t, "", "tls", "root", "--dir", v.dir)
+	if err != nil || !strings.HasPrefix(root, "-----BEGIN CERTIFICATE-----") {
+		t.Fatalf("tls root: %v\n%s", err, root)
+	}
+	v.root = []byte(root)
 	return v
 }
 
@@ -117,10 +122,10 @@ func (v *vault) operator(name string) *vaulttest.Operator {
 	}
 	cfg, _ := state.Dir{Path: v.dir}.Config()
 	u := server.OperatorURL(cfg)
-	if !strings.Contains(out, "curl -k --pinnedpubkey "+tlsutil.CurlPin(v.pin)+" -H 'Authorization: Bearer "+m[1]+"' "+u+"/v1/requests") {
+	if !strings.Contains(out, "curl --cacert vault-ca.pem -H 'Authorization: Bearer "+m[1]+"' "+u+"/v1/requests") {
 		v.t.Fatalf("operator add output:\n%s", out)
 	}
-	return vaulttest.NewOperator(u, v.pin, m[1])
+	return vaulttest.NewOperator(u, v.root, v.pin, m[1])
 }
 
 // approve approves the machine's pending request over the operator
@@ -140,7 +145,7 @@ func approve(t *testing.T, v *vault, o *vaulttest.Operator, m *vaulttest.Machine
 	return res
 }
 
-func (v *vault) client() *vaulttest.Client { return vaulttest.NewClient(v.url, v.pin) }
+func (v *vault) client() *vaulttest.Client { return vaulttest.NewClient(v.url, v.root, v.pin) }
 
 // enrol creates a token with the CLI and enrols a machine with it.
 func (v *vault) enrol(name string) *vaulttest.Machine { return v.enrolWith(name, false) }
@@ -277,7 +282,7 @@ func TestCommands(t *testing.T) {
 		t.Fatalf("config set while serving: %v", err)
 	}
 	out, err = cli(t, "", "operator", "add", "alice", "--socket", v.sock)
-	if err != nil || !strings.Contains(out, "The operator interface is off") || !strings.Contains(out, tlsutil.CurlPin(v.pin)) {
+	if err != nil || !strings.Contains(out, "The operator interface is off") || !strings.Contains(out, "tls root > vault-ca.pem") {
 		t.Fatalf("operator add while off: %v\n%s", err, out)
 	}
 	cli(t, "", "operator", "remove", "alice", "--socket", v.sock)

@@ -3,9 +3,7 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"io/fs"
-	"log"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,21 +14,14 @@ import (
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
 )
 
 // operatorURL starts the operator interface on its own TLS listener.
 func (e *env) operatorURL() string {
 	e.t.Helper()
-	cert, _, err := tlsutil.Load(e.dir)
-	if err != nil {
-		e.t.Fatal(err)
-	}
 	ts := httptest.NewUnstartedServer(e.srv.OperatorHandler())
-	ts.TLS = tlsutil.ServerConfig(cert)
-	ts.Config.ErrorLog = log.New(io.Discard, "", 0)
-	ts.StartTLS()
+	startVaultTLS(ts, e.certs)
 	e.t.Cleanup(ts.Close)
 	return ts.URL
 }
@@ -42,7 +33,7 @@ func (e *env) addOperator(name string) string {
 	if code, msg := e.adminDo("POST", "/v1/operators", server.OperatorRequest{Name: name}, &o); code != 200 {
 		e.t.Fatalf("operator add: %d %s", code, msg)
 	}
-	if o.Token == "" || o.CurlPin != tlsutil.CurlPin(e.pin) || !strings.HasPrefix(o.CurlPin, "sha256//") {
+	if o.Token == "" || o.Pin != e.pin {
 		e.t.Fatalf("operator added %+v", o)
 	}
 	return o.Token
@@ -218,11 +209,11 @@ func TestOperatorInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := e.addOperator("alice")
-	alice := vaulttest.NewOperator(url, e.pin, token)
+	alice := vaulttest.NewOperator(url, e.root, e.pin, token)
 
 	for _, o := range []*vaulttest.Operator{
-		vaulttest.NewOperator(url, e.pin, ""),
-		vaulttest.NewOperator(url, e.pin, "wrong"),
+		vaulttest.NewOperator(url, e.root, e.pin, ""),
+		vaulttest.NewOperator(url, e.root, e.pin, "wrong"),
 	} {
 		code, body, err := o.Do("GET", "/v1/requests", "")
 		if err != nil || code != 401 || strings.TrimSpace(string(body)) != `{"error":"unauthorized"}` {
@@ -306,14 +297,14 @@ func TestOperatorInterface(t *testing.T) {
 func TestOperatorAuthRateLimit(t *testing.T) {
 	e := newEnv(t)
 	url := e.operatorURL()
-	bob := vaulttest.NewOperator(url, e.pin, e.addOperator("bob"))
+	bob := vaulttest.NewOperator(url, e.root, e.pin, e.addOperator("bob"))
 	if code, _ := e.adminDo("POST", "/v1/operators", server.OperatorRequest{Name: "bob"}, nil); code != 409 {
 		t.Fatalf("bob twice: %d", code)
 	}
 	if code, _ := e.adminDo("POST", "/v1/operators", server.OperatorRequest{Name: "../x"}, nil); code != 400 {
 		t.Fatalf("a bad name: %d", code)
 	}
-	mallory := vaulttest.NewOperator(url, e.pin, "guess")
+	mallory := vaulttest.NewOperator(url, e.root, e.pin, "guess")
 	for i := 0; i < server.AuthFailLimit; i++ {
 		if code, _, _ := mallory.Do("GET", "/v1/requests", ""); code != 401 {
 			t.Fatalf("guess %d: %d", i, code)

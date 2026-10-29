@@ -3,6 +3,7 @@ package server_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,8 @@ type env struct {
 	admin  http.Handler
 	ts     *httptest.Server
 	pin    string
+	root   []byte // the vault's root, PEM
+	certs  *tlsutil.Certs
 	client *vaulttest.Client
 }
 
@@ -47,11 +50,12 @@ func newEnv(t *testing.T) *env {
 	if err := tlsutil.Write(e.dir, "127.0.0.1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	cert, pin, err := tlsutil.Load(e.dir)
+	certs, err := tlsutil.Load(e.dir, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.pin = pin
+	pin := certs.Pin()
+	e.pin, e.root, e.certs = pin, certs.RootPEM(), certs
 	if e.rk, err = keys.NewRecoveryKey(); err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +69,9 @@ func newEnv(t *testing.T) *env {
 	e.srv = server.New(server.Options{Dir: e.dir, Config: e.cfg, Sealer: e.sealer, Audit: audit, Pin: pin, Now: e.clock.Now})
 	e.admin = e.srv.AdminHandler()
 	e.ts = httptest.NewUnstartedServer(e.srv.MachineHandler())
-	e.ts.TLS = tlsutil.ServerConfig(cert)
-	e.ts.Config.ErrorLog = log.New(io.Discard, "", 0) // the refused handshake of TestPin
-	e.ts.StartTLS()
+	startVaultTLS(e.ts, certs) // the refused handshake of TestPin goes nowhere
 	t.Cleanup(e.ts.Close)
-	e.client = vaulttest.NewClient(e.ts.URL, pin)
+	e.client = vaulttest.NewClient(e.ts.URL, e.root, pin)
 	return e
 }
 
@@ -632,7 +634,7 @@ func TestVaultBootStateChanged(t *testing.T) {
 func TestPin(t *testing.T) {
 	e := newEnv(t)
 	m, _ := vaulttest.NewMachine("a")
-	wrong := vaulttest.NewClient(e.ts.URL, vaultproto.PinOf([]byte("another key")))
+	wrong := vaulttest.NewClient(e.ts.URL, e.root, vaultproto.PinOf([]byte("another key")))
 	_, err := m.Challenge(wrong)
 	if err == nil || !strings.Contains(err.Error(), "pin") {
 		t.Fatalf("a wrong pin: %v", err)
@@ -640,4 +642,14 @@ func TestPin(t *testing.T) {
 	if _, err := m.Challenge(e.client); err == nil || !strings.Contains(err.Error(), "unknown device") {
 		t.Fatalf("the right pin: %v", err)
 	}
+}
+
+// startVaultTLS serves ts with the vault's TLS as serve does: its leaf and
+// root through GetCertificate. (httptest's StartTLS would add its own
+// certificate, which a client without a server name - an address - gets.)
+func startVaultTLS(ts *httptest.Server, certs *tlsutil.Certs) {
+	ts.Config.ErrorLog = log.New(io.Discard, "", 0)
+	ts.Listener = tls.NewListener(ts.Listener, certs.ServerConfig())
+	ts.Start()
+	ts.URL = "https://" + ts.Listener.Addr().String()
 }
