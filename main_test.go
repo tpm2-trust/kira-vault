@@ -303,8 +303,8 @@ func TestCommands(t *testing.T) {
 	}
 	res = approve(t, v, alice, p, `{"pepper":"s3cret"}`)
 	wantReleased(t, p, res)
-	if string(res.Pepper) != "s3cret" {
-		t.Fatalf("released pepper %q", res.Pepper)
+	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "s3cret" {
+		t.Fatalf("released pepper %q: %v", got, err)
 	}
 	if out, err := cli(t, "", "audit", "--socket", v.sock); err != nil || !strings.Contains(out, "approve  done  "+hex.EncodeToString(p.DeviceID)+" (db-04)") || !strings.Contains(out, "by alice") || strings.Contains(out, "s3cret") {
 		t.Fatalf("audit: %v\n%s", err, out)

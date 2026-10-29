@@ -10,6 +10,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,7 +39,9 @@ type Machine struct {
 	Approval  []byte
 	Pepper    bool               // the keyslot is enrolled with an operator's pepper
 	R         []byte             // the remote part in the clear, as the machine drew it
-	Remote    vaultproto.Wrapped // R wrapped for the TPM (EK and the AK's name stand in for the release key)
+	Remote    vaultproto.Wrapped // R wrapped for the TPM: its EK and the slot's release key
+	RKPublic  []byte             // the slot's release key (TPMT_PUBLIC)
+	RKName    []byte             // and its Name
 }
 
 // NewMachine makes a machine whose signing key approved its PCRs at
@@ -62,7 +65,10 @@ func NewMachine(name string) (*Machine, error) {
 	}
 	rand.Read(m.DeviceID)
 	rand.Read(m.R)
-	cred, enc, err := attest.MakeCredential(rand.Reader, s.EKPub, s.AKName, m.R)
+	if m.RKPublic, m.RKName, err = s.ReleaseKey(m.SigningPublic(), m.PolicyRef); err != nil {
+		return nil, err
+	}
+	cred, enc, err := attest.MakeCredential(rand.Reader, s.EKPub, m.RKName, m.R)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +117,7 @@ func (m *Machine) EnrolRequest(token string) *vaultproto.EnrolRequest {
 		EKPublic: m.TPM.EKPub, AKPublic: m.TPM.AKPub,
 		SigningPublic: m.SigningPublic(), PolicyRef: m.PolicyRef, GenerationIndexName: m.GenIndex,
 		Generation: m.Gen, Selection: m.Selection, Remote: m.Remote, Label: "root", Pepper: m.Pepper,
+		ReleaseKeyPublic: m.RKPublic,
 	}
 }
 
@@ -229,7 +236,21 @@ func (m *Machine) Release(c *Client) (*vaultproto.ReleaseRequest, *vaultproto.Re
 // Open opens a released remote part with the machine's TPM, as the
 // machine's ActivateCredential does.
 func (m *Machine) Open(w *vaultproto.Wrapped) ([]byte, error) {
-	return m.TPM.ActivateCredential(w.Credential, w.EncryptedSecret)
+	return m.TPM.ActivateCredentialFor(m.RKName, w.Credential, w.EncryptedSecret)
+}
+
+// OpenPepper opens the pepper a release carries, as the machine's TPM does:
+// its key with the release key, then the pepper.
+func (m *Machine) OpenPepper(w *vaultproto.WrappedPepper) (string, error) {
+	if w == nil {
+		return "", errors.New("no pepper")
+	}
+	k, err := m.Open(&w.Key)
+	if err != nil {
+		return "", err
+	}
+	p, err := vaultproto.OpenPepper(k, m.DeviceID, w)
+	return string(p), err
 }
 
 // Operator is an operator's client of the operator interface, as curl

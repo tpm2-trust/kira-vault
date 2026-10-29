@@ -407,6 +407,10 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 	if err != nil {
 		return nil, err
 	}
+	rkName, err := req.ReleaseKeyName()
+	if err != nil {
+		return nil, refuse(http.StatusBadRequest, "the enrolment request: "+err.Error())
+	}
 	mode := e.token.Mode
 	if req.Pepper {
 		mode = vaultproto.ModeApprove
@@ -420,6 +424,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		PepperRequired:      req.Pepper,
 		EKPublic:            req.EKPublic,
 		EKCert:              req.EKCert,
+		ReleaseKeyName:      rkName,
 		AKPublic:            pinned.AKPublic,
 		SigningPublic:       pinned.SigningPublic,
 		PolicyRef:           pinned.PolicyRef,
@@ -540,9 +545,6 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		res, err = s.release(&req, r.RemoteAddr)
 	}
 	s.answer(w, res, err)
-	if res != nil {
-		clear(res.Pepper)
-	}
 }
 
 func requestDigest(req *vaultproto.ReleaseRequest) []byte {
@@ -646,6 +648,9 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 	if d.PepperRequired && len(q.pepper) == 0 { // decide refuses such an approval; this keeps it so
 		return deny("this device was enrolled with a pepper, and the approval carries none")
 	}
+	if d.PepperRequired && len(d.ReleaseKeyName) == 0 {
+		return deny("this device was enrolled before peppers were wrapped for its TPM: enrol it again")
+	}
 
 	kdev, err := s.sealer.Unseal(&d.Sealed)
 	if err != nil {
@@ -683,12 +688,14 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		entry.Detail += ", approved by " + q.actor
 	}
 	if d.PepperRequired {
-		res.Pepper = append([]byte(nil), q.pepper...)
+		if res.Pepper, err = vaultproto.WrapPepper(rand.Reader, d.EKPublic, d.ReleaseKeyName, d.ID, q.pepper); err != nil {
+			s.log.Printf("device %s: wrapping the pepper: %v", dev, err)
+			return deny("the vault could not wrap the pepper for the device's TPM")
+		}
 		entry.Detail += ", with a pepper"
 	}
 	s.forget(q)
 	if err := s.logAudit(entry); err != nil {
-		clear(res.Pepper)
 		return nil, err
 	}
 	return res, nil

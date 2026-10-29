@@ -72,6 +72,9 @@ type Device struct {
 	PepperRequired bool   `json:"pepper_required"`
 	EKPublic       []byte `json:"ek_public"`
 	EKCert         []byte `json:"ek_cert,omitempty"`
+	// ReleaseKeyName is the Name of the slot's release key, checked at
+	// enrolment: a pepper is wrapped for it and the EK at every release.
+	ReleaseKeyName []byte `json:"release_key_name,omitempty"`
 
 	AKPublic            []byte               `json:"ak_public"`
 	SigningPublic       []byte               `json:"signing_public"`

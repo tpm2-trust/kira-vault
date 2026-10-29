@@ -26,8 +26,8 @@ func TestVaultOnSWTPM(t *testing.T) {
 	p := v.enrolWith("db-04", true)
 	res := approve(t, v, alice, p, `{"pepper":"from the operator"}`)
 	wantReleased(t, p, res)
-	if string(res.Pepper) != "from the operator" {
-		t.Fatalf("released pepper %q", res.Pepper)
+	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "from the operator" {
+		t.Fatalf("released pepper %q: %v", got, err)
 	}
 
 	vaulttest.ExtendPCR(t, sock, 23, "another boot of the vault")
@@ -50,7 +50,7 @@ func TestVaultOnSWTPM(t *testing.T) {
 	wantReleased(t, m, v.release(m))
 	res = approve(t, v, alice, p, `{"pepper":"from the operator"}`)
 	wantReleased(t, p, res)
-	if string(res.Pepper) != "from the operator" {
-		t.Fatalf("released pepper after reseal %q", res.Pepper)
+	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "from the operator" {
+		t.Fatalf("released pepper after reseal %q: %v", got, err)
 	}
 }
