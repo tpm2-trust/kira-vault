@@ -430,6 +430,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		PolicyRef:           pinned.PolicyRef,
 		GenerationIndexName: pinned.GenerationIndexName,
 		Selection:           pinned.Selection,
+		PCRKey:              pinned.PCRKey,
 		MinGeneration:       req.Generation,
 		EnrolledAt:          now.UTC(),
 		Remote:              encRemote,

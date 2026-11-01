@@ -81,6 +81,7 @@ type Device struct {
 	PolicyRef           []byte               `json:"policy_ref"`
 	GenerationIndexName []byte               `json:"generation_index_name"`
 	Selection           vaultproto.Selection `json:"selection"`
+	PCRKey              []byte               `json:"pcr_key,omitempty"` // PKIX DER, for Selection.Signed
 
 	MinGeneration uint64     `json:"min_generation"` // the highest verified generation
 	Revoked       bool       `json:"revoked"`
@@ -107,6 +108,7 @@ func (d *Device) Pinned() *vaultproto.Device {
 		PolicyRef:           d.PolicyRef,
 		GenerationIndexName: d.GenerationIndexName,
 		Selection:           d.Selection,
+		PCRKey:              d.PCRKey,
 	}
 }
 
