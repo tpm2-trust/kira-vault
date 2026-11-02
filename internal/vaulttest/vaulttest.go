@@ -130,7 +130,7 @@ func (m *Machine) ReleaseRequest(ch *vaultproto.ChallengeResponse) (*vaultproto.
 	}
 	req := &vaultproto.ReleaseRequest{
 		RequestID: ch.RequestID, DeviceID: m.DeviceID, Quoted: q.Quoted, QuoteSignature: q.Signature,
-		Generation: m.Gen, ApprovalSignature: m.Approval,
+		Generation: m.Gen, ApprovalSignature: m.Approval, PCR7Chain: m.TPM.PCR7Chain,
 	}
 	for _, v := range q.Values {
 		req.PCRValues = append(req.PCRValues, vaultproto.PCRValue{Index: v.Index, Value: v.Digest})

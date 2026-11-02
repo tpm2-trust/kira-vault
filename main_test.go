@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
@@ -223,6 +224,7 @@ func TestCommands(t *testing.T) {
 	if err != nil || !strings.Contains(out, "db-03") || !strings.Contains(out, "active") {
 		t.Fatalf("devices: %v\n%s", err, out)
 	}
+	secureBootInTheCLI(t, v, m)
 	if out, err = cli(t, "", "device", "revoke", "db-03", "--socket", v.sock); err != nil || !strings.Contains(out, "revoked") {
 		t.Fatalf("revoke: %v\n%s", err, out)
 	}
@@ -413,4 +415,41 @@ func TestCLIAnswersTheQueue(t *testing.T) {
 	if out, err := cli(t, "", "audit", "--socket", v.sock); err != nil || strings.Contains(out, "s3cret") {
 		t.Fatalf("the audit: %v\n%s", err, out)
 	}
+}
+
+// The CLI's three places say Secure Boot's state; every state but on with the word
+// WARNING, for where there is no colour.
+func secureBootInTheCLI(t *testing.T, v *vault, m *vaulttest.Machine) {
+	t.Helper()
+	for _, tc := range []struct {
+		state, table, line string
+	}{
+		{attest.SecureBootOn, " on\n", "secure boot:     Secure Boot on"},
+		{attest.SecureBootOff, "OFF\n", "secure boot:     WARNING: Secure Boot OFF"},
+		{attest.SecureBootSetupMode, "SETUP-MODE\n", "secure boot:     WARNING: Secure Boot in SETUP MODE"},
+		{"no log", "NOT-ESTABLISHED\n", "secure boot:     WARNING: Secure Boot NOT ESTABLISHED"},
+	} {
+		if tc.state == "no log" {
+			m.TPM.PCR7Chain = nil
+		} else {
+			m.TPM.SetSecureBoot(tc.state)
+		}
+		m.Approve()
+		wantReleased(t, m, v.release(m))
+		out, err := cli(t, "", "devices", "--dir", v.dir)
+		if err != nil || !strings.Contains(out, tc.table) {
+			t.Errorf("%s: devices: %v\n%s", tc.state, err, out)
+		}
+		if out, err = cli(t, "", "device", "show", "db-03", "--socket", v.sock); err != nil || !strings.Contains(out, tc.line) {
+			t.Errorf("%s: device show: %v\n%s", tc.state, err, out)
+		}
+		out, err = cli(t, "", "audit", "--socket", v.sock)
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		last := lines[len(lines)-1]
+		if err != nil || !strings.Contains(last, "released") || strings.Contains(last, "WARNING") != (tc.state != attest.SecureBootOn) {
+			t.Errorf("%s: audit: %v\n%s", tc.state, err, last)
+		}
+	}
+	m.TPM.SetSecureBoot(attest.SecureBootOn)
+	m.Approve()
 }

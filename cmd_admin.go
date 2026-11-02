@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
@@ -148,9 +149,9 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "DEVICE\tNAME\tMODE\tPEPPER\tSTATE\tGENERATION\tLAST RELEASE")
+		fmt.Fprintln(tw, "DEVICE\tNAME\tMODE\tPEPPER\tSTATE\tGENERATION\tLAST RELEASE\tSECURE BOOT")
 		for _, d := range list {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n", d.ID, d.Name, d.Mode, yesNo(d.Pepper), deviceState(&d), d.MinGeneration, when(d.LastRelease))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", d.ID, d.Name, d.Mode, yesNo(d.Pepper), deviceState(&d), d.MinGeneration, when(d.LastRelease), secureBootWord(d.SecureBoot))
 		}
 		return tw.Flush()
 
@@ -203,9 +204,9 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "REQUEST\tDEVICE\tNAME\tSTATE\tPEPPER\tGENERATION\tFROM\tEXPIRES")
+		fmt.Fprintln(tw, "REQUEST\tDEVICE\tNAME\tSTATE\tPEPPER\tGENERATION\tFROM\tEXPIRES\tSECURE BOOT")
 		for _, q := range list {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", q.ID, q.DeviceID, q.Name, q.State, yesNo(q.Pepper), q.Generation, q.Remote, q.Expires.Local().Format(time.TimeOnly))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", q.ID, q.DeviceID, q.Name, q.State, yesNo(q.Pepper), q.Generation, q.Remote, q.Expires.Local().Format(time.TimeOnly), secureBootWord(q.SecureBoot))
 		}
 		return tw.Flush()
 
@@ -329,6 +330,46 @@ func printDevice(w io.Writer, d *server.DeviceView) {
 	fmt.Fprintf(w, "vault PCRs:      %s\n", formatPCRs(d.VaultPCRs))
 	fmt.Fprintf(w, "enrolled:        %s\n", d.EnrolledAt.Local().Format(time.DateTime))
 	fmt.Fprintf(w, "last release:    %s\n", when(d.LastRelease))
+	fmt.Fprintf(w, "secure boot:     %s\n", red(w, d.SecureBootRed, secureBootLine(d.SecureBoot, d.SecureBootAt)))
+}
+
+// secureBootLine is a state as a person reads it; every state but on carries the
+// word WARNING, so that it stands out where there is no colour either.
+func secureBootLine(f attest.SecureBootFinding, at *time.Time) string {
+	line := f.String()
+	if f.Red() {
+		line = "WARNING: " + line
+	}
+	if at != nil {
+		line += " (established " + at.Local().Format(time.DateTime) + ")"
+	}
+	return line
+}
+
+// secureBootWord is a state in a table's column.
+func secureBootWord(f attest.SecureBootFinding) string {
+	switch f.State {
+	case attest.SecureBootOn:
+		return "on"
+	case attest.SecureBootOff:
+		return "OFF"
+	case attest.SecureBootSetupMode:
+		return "SETUP-MODE"
+	}
+	return "NOT-ESTABLISHED"
+}
+
+// red colours text on a terminal, when on says so.
+func red(w io.Writer, on bool, text string) string {
+	if !on {
+		return text
+	}
+	if f, ok := w.(*os.File); ok {
+		if _, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS); err == nil {
+			return "\033[0;31m" + text + "\033[0m"
+		}
+	}
+	return text
 }
 
 // formatEntry is an audit line for a person; a line that does not parse
@@ -362,6 +403,11 @@ func formatEntry(line []byte) string {
 	}
 	if e.Detail != "" {
 		parts = append(parts, "- "+e.Detail)
+	}
+	if e.SecureBootRed {
+		parts = append(parts, "- WARNING: "+e.SecureBoot)
+	} else if e.SecureBoot != "" {
+		parts = append(parts, "- "+e.SecureBoot)
 	}
 	return strings.Join(parts, "  ")
 }
@@ -447,6 +493,7 @@ func answerQueue(c *adminClient, ask func(string, bool) (string, error), stdout 
 			pepper = ", with a pepper"
 		}
 		fmt.Fprintf(stdout, "Request %s: %s (%s), generation %d, from %s%s, until %s\n", r.ID, r.Name, r.DeviceID, r.Generation, r.Remote, pepper, r.Expires.Local().Format(time.TimeOnly))
+		fmt.Fprintf(stdout, "  %s\n", red(stdout, r.SecureBootRed, secureBootLine(r.SecureBoot, nil)))
 		for {
 			a, err := ask("Approve, deny or skip? [a/d/s] ", false)
 			if err != nil {

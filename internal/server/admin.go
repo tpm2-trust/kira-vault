@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
@@ -37,6 +38,11 @@ type DeviceView struct {
 	LastRelease   *time.Time             `json:"last_release,omitempty"`
 	Selection     vaultproto.Selection   `json:"selection"`
 	VaultPCRs     []uint8                `json:"vault_pcrs"` // the vault PCRs its key is sealed to
+	// SecureBoot is what the last verified quote established; not established before
+	// the first. SecureBootRed marks every state but on.
+	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
+	SecureBootRed bool                     `json:"secure_boot_red"`
+	SecureBootAt  *time.Time               `json:"secure_boot_at,omitempty"`
 }
 
 // RequestView is a pending release request.
@@ -52,6 +58,10 @@ type RequestView struct {
 	Remote     string                `json:"remote"`
 	Generation uint64                `json:"generation"`
 	PCRValues  []vaultproto.PCRValue `json:"pcr_values"`
+	// SecureBoot is what this request's quote established. SecureBootRed marks
+	// every state but on: an operator sees it before approving.
+	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
+	SecureBootRed bool                     `json:"secure_boot_red"`
 }
 
 // ModeRequest is the body of POST /v1/devices/{id}/mode.
@@ -112,7 +122,12 @@ func (s *Server) AdminHandler() http.Handler {
 }
 
 func viewOf(d *state.Device) DeviceView {
+	sb := attest.SecureBootFinding{State: attest.SecureBootNotEstablished, Detail: "no verified quote yet: the device has not asked for a release"}
+	if d.SecureBoot != nil {
+		sb = *d.SecureBoot
+	}
 	return DeviceView{
+		SecureBoot: sb, SecureBootRed: sb.Red(), SecureBootAt: d.SecureBootAt,
 		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired,
 		MinGeneration: d.MinGeneration, Revoked: d.Revoked, Locked: d.Locked, Failures: d.Failures,
 		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection, VaultPCRs: d.Sealed.PCRs,
@@ -252,6 +267,7 @@ func (s *Server) adminRequests(w http.ResponseWriter, r *http.Request) {
 		}
 		if q.checked != nil {
 			v.Generation, v.PCRValues = q.checked.Generation, q.checked.PCRValues
+			v.SecureBoot, v.SecureBootRed = q.checked.SecureBoot, q.checked.SecureBoot.Red()
 		}
 		views = append(views, v)
 	}

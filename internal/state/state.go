@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
@@ -89,6 +90,10 @@ type Device struct {
 	Failures      int        `json:"failures"` // failed verifications in a row
 	EnrolledAt    time.Time  `json:"enrolled_at"`
 	LastRelease   *time.Time `json:"last_release,omitempty"`
+	// SecureBoot is what the last verified quote and its event log established;
+	// nil before the first. Shown red unless on; it decides nothing.
+	SecureBoot   *attest.SecureBootFinding `json:"secure_boot,omitempty"`
+	SecureBootAt *time.Time                `json:"secure_boot_at,omitempty"`
 
 	// Remote is the machine's wrapped R (the JSON of a vaultproto.Wrapped),
 	// encrypted with AES-256-GCM under K_dev, the device ID as AAD.

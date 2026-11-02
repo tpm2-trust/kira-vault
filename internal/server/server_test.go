@@ -18,6 +18,9 @@ import (
 
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
+	"github.com/mrwiora/tpm2-kira/core/attest/attesttest"
+
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
@@ -652,4 +655,94 @@ func startVaultTLS(ts *httptest.Server, certs *tlsutil.Certs) {
 	ts.Listener = tls.NewListener(ts.Listener, certs.ServerConfig())
 	ts.Start()
 	ts.URL = "https://" + ts.Listener.Addr().String()
+}
+
+// The vault shows Secure Boot's state as the quote and the event log establish it,
+// in the device's view and the audit, in every state, and it releases as before:
+// it decides nothing.
+func TestSecureBootStates(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		boot       func(m *vaulttest.Machine)
+	}{
+		{"on", attest.SecureBootOn, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootOn) }},
+		{"off", attest.SecureBootOff, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootOff) }},
+		{"Setup Mode", attest.SecureBootSetupMode, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootSetupMode) }},
+		{"no event log", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) { m.TPM.PCR7Chain = nil }},
+		{"events of another boot", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) {
+			m.TPM.SetSecureBoot(attest.SecureBootOff)
+			m.TPM.PCR7Chain = attesttest.SecureBootChain(attest.AlgSHA256, attest.SecureBootOn)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			m := e.machine(0)
+			if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootNotEstablished || !v.SecureBootRed {
+				t.Fatalf("before the first quote: %+v", v.SecureBoot)
+			}
+			tc.boot(m)
+			m.Approve()
+			wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+			v := e.deviceView(m)
+			if v.SecureBoot.State != tc.want || v.SecureBootRed != (tc.want != attest.SecureBootOn) || v.SecureBootAt == nil {
+				t.Fatalf("the device's view: %+v, red %v", v.SecureBoot, v.SecureBootRed)
+			}
+			lines := e.auditLines()
+			last := lines[len(lines)-1]
+			if last.Result != "released" || last.SecureBootRed != v.SecureBootRed || last.SecureBoot != v.SecureBoot.String() {
+				t.Fatalf("the audit: %+v, the view: %+v", last, v.SecureBoot)
+			}
+		})
+	}
+}
+
+// The approvals are of PCR 7's value: a state that moved it is refused until the
+// signing key approves it, and once it does, off releases like on: the state decides
+// nothing. What was refused is still shown.
+func TestChangedPCR7IsRefusedAndShown(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(0)
+	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+	if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootOn {
+		t.Fatalf("on: %+v", v.SecureBoot)
+	}
+	m.TPM.SetSecureBoot(attest.SecureBootOff)
+	wantStatus(t, e.release(m), vaultproto.StatusDenied, "does not cover this boot state")
+	if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootOff || !v.SecureBootRed {
+		t.Fatalf("refused with Secure Boot off: %+v", v.SecureBoot)
+	}
+	lines := e.auditLines()
+	if last := lines[len(lines)-1]; last.Result != "denied" || !last.SecureBootRed || !strings.Contains(last.SecureBoot, "OFF") {
+		t.Fatalf("the audit: %+v", last)
+	}
+	m.Approve()
+	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+	if v := e.deviceView(m); !v.SecureBootRed {
+		t.Fatalf("approved with Secure Boot off: %+v", v.SecureBoot)
+	}
+}
+
+// An operator sees the state on the request, before approving.
+func TestRequestShowsSecureBoot(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(vaultproto.ModeApprove)
+	m.TPM.SetSecureBoot(attest.SecureBootSetupMode)
+	m.Approve()
+	wantStatus(t, e.release(m), vaultproto.StatusPending, "")
+	var list []server.RequestView
+	if code, msg := e.adminDo("GET", "/v1/requests", nil, &list); code != 200 || len(list) != 1 {
+		t.Fatalf("requests: %d %s %d", code, msg, len(list))
+	}
+	if list[0].SecureBoot.State != attest.SecureBootSetupMode || !list[0].SecureBootRed {
+		t.Fatalf("the request: %+v", list[0])
+	}
+}
+
+func (e *env) deviceView(m *vaulttest.Machine) *server.DeviceView {
+	e.t.Helper()
+	var v server.DeviceView
+	if code, msg := e.adminDo("GET", "/v1/devices/"+hex.EncodeToString(m.DeviceID), nil, &v); code != 200 {
+		e.t.Fatalf("device: %d %s", code, msg)
+	}
+	return &v
 }

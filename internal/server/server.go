@@ -614,6 +614,17 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 	}
 
 	checked, verr := vaultproto.VerifyRelease(d.Pinned(), q.nonce, req, d.MinGeneration)
+	if checked != nil {
+		// What the verified quote says of the boot, for the device's view and the
+		// audit, also of a release refused below. It decides nothing.
+		entry.SecureBoot, entry.SecureBootRed = checked.SecureBoot.String(), checked.SecureBoot.Red()
+		t := now.UTC()
+		sb := checked.SecureBoot
+		d.SecureBoot, d.SecureBootAt = &sb, &t
+		if err := s.dir.SaveDevice(d); err != nil {
+			return nil, err
+		}
+	}
 	if verr != nil {
 		d.Failures++
 		reason := verr.Error()
