@@ -435,7 +435,11 @@ func secureBootInTheCLI(t *testing.T, v *vault, m *vaulttest.Machine) {
 			m.TPM.SetSecureBoot(tc.state)
 		}
 		m.Approve()
-		wantReleased(t, m, v.release(m))
+		if res := v.release(m); tc.state == attest.SecureBootOn {
+			wantReleased(t, m, res)
+		} else if res.Status != vaultproto.StatusDenied || !strings.Contains(res.Reason, "this vault releases only to a boot with Secure Boot on") {
+			t.Errorf("%s: %s, %s", tc.state, res.Status, res.Reason)
+		}
 		out, err := cli(t, "", "devices", "--dir", v.dir)
 		if err != nil || !strings.Contains(out, tc.table) {
 			t.Errorf("%s: devices: %v\n%s", tc.state, err, out)
@@ -446,7 +450,8 @@ func secureBootInTheCLI(t *testing.T, v *vault, m *vaulttest.Machine) {
 		out, err = cli(t, "", "audit", "--socket", v.sock)
 		lines := strings.Split(strings.TrimSpace(out), "\n")
 		last := lines[len(lines)-1]
-		if err != nil || !strings.Contains(last, "released") || strings.Contains(last, "WARNING") != (tc.state != attest.SecureBootOn) {
+		on := tc.state == attest.SecureBootOn
+		if err != nil || strings.Contains(last, "released") != on || strings.Contains(last, "denied") == on || strings.Contains(last, "WARNING") == on {
 			t.Errorf("%s: audit: %v\n%s", tc.state, err, last)
 		}
 	}

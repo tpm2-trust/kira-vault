@@ -91,7 +91,7 @@ type Device struct {
 	EnrolledAt    time.Time  `json:"enrolled_at"`
 	LastRelease   *time.Time `json:"last_release,omitempty"`
 	// SecureBoot is what the last verified quote and its event log established;
-	// nil before the first. Shown red unless on; it decides nothing.
+	// nil before the first. Shown red unless on; the vault releases only when on.
 	SecureBoot   *attest.SecureBootFinding `json:"secure_boot,omitempty"`
 	SecureBootAt *time.Time                `json:"secure_boot_at,omitempty"`
 

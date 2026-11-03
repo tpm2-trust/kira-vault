@@ -20,6 +20,9 @@
 //     operator unlocks it;
 //   - at most RateLimit challenges per device per RateWindow;
 //   - the highest verified generation is kept, a lower one is refused;
+//   - nothing is released unless the quote establishes Secure Boot on (PCR 7 and its
+//     events replayed): off, Setup Mode and not established, a selection without
+//     PCR 7 among them, are refused, audited and shown, whatever an approval says;
 //   - every enrolment, challenge, verification, release, denial and admin
 //     action goes to the audit log.
 //
@@ -616,7 +619,7 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 	checked, verr := vaultproto.VerifyRelease(d.Pinned(), q.nonce, req, d.MinGeneration)
 	if checked != nil {
 		// What the verified quote says of the boot, for the device's view and the
-		// audit, also of a release refused below. It decides nothing.
+		// audit, also of a release refused below.
 		entry.SecureBoot, entry.SecureBootRed = checked.SecureBoot.String(), checked.SecureBoot.Red()
 		t := now.UTC()
 		sb := checked.SecureBoot
@@ -643,6 +646,13 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		if err := s.dir.SaveDevice(d); err != nil {
 			return nil, err
 		}
+	}
+
+	// No per-device exception: the boot chain's signatures are what the approvals'
+	// values rest on. A verified quote, so no failure of the device; an operator is not
+	// asked about what would be refused.
+	if checked.SecureBoot.State != attest.SecureBootOn {
+		return deny(checked.SecureBoot.String() + ": this vault releases only to a boot with Secure Boot on")
 	}
 
 	if q.state == fresh && (d.Mode == vaultproto.ModeApprove || d.PepperRequired) {

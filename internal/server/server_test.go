@@ -657,10 +657,10 @@ func startVaultTLS(ts *httptest.Server, certs *tlsutil.Certs) {
 	ts.URL = "https://" + ts.Listener.Addr().String()
 }
 
-// The vault shows Secure Boot's state as the quote and the event log establish it,
-// in the device's view and the audit, in every state, and it releases as before:
-// it decides nothing.
-func TestSecureBootStates(t *testing.T) {
+// Nothing is released unless the quote establishes Secure Boot on: every other state is
+// refused, whatever the approvals say, shown in the device's view and in the audit, and
+// no failure of the device, whose quote verified.
+func TestReleaseOnlyWithSecureBootOn(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string
 		boot       func(m *vaulttest.Machine)
@@ -682,23 +682,60 @@ func TestSecureBootStates(t *testing.T) {
 			}
 			tc.boot(m)
 			m.Approve()
-			wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+			on := tc.want == attest.SecureBootOn
+			if on {
+				wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+			} else {
+				wantStatus(t, e.release(m), vaultproto.StatusDenied, "this vault releases only to a boot with Secure Boot on")
+			}
 			v := e.deviceView(m)
-			if v.SecureBoot.State != tc.want || v.SecureBootRed != (tc.want != attest.SecureBootOn) || v.SecureBootAt == nil {
+			if v.SecureBoot.State != tc.want || v.SecureBootRed == on || v.SecureBootAt == nil {
 				t.Fatalf("the device's view: %+v, red %v", v.SecureBoot, v.SecureBootRed)
+			}
+			if d := e.device(m); d.Failures != 0 || d.Locked {
+				t.Fatalf("a verified quote counted as a failure: %+v", d)
 			}
 			lines := e.auditLines()
 			last := lines[len(lines)-1]
-			if last.Result != "released" || last.SecureBootRed != v.SecureBootRed || last.SecureBoot != v.SecureBoot.String() {
+			want := "denied"
+			if on {
+				want = "released"
+			}
+			if last.Result != want || last.SecureBootRed != v.SecureBootRed || last.SecureBoot != v.SecureBoot.String() {
 				t.Fatalf("the audit: %+v, the view: %+v", last, v.SecureBoot)
 			}
 		})
 	}
 }
 
-// The approvals are of PCR 7's value: a state that moved it is refused until the
-// signing key approves it, and once it does, off releases like on: the state decides
-// nothing. What was refused is still shown.
+// A slot chosen without PCR 7 is held to it all the same: its quote says nothing of
+// Secure Boot, so it is not established and refused, by an operator's approval too.
+func TestSelectionWithoutPCR7IsRefused(t *testing.T) {
+	for _, mode := range []vaultproto.ReleaseMode{vaultproto.ModeAuto, vaultproto.ModeApprove} {
+		e := newEnv(t)
+		m, err := vaulttest.NewMachine("db-03")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Selection.Indices = []uint8{0, 11}
+		m.Approve()
+		if _, err := m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-03", Mode: mode})); err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, e.release(m), vaultproto.StatusDenied, "the quote does not cover PCR 7")
+		if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootNotEstablished || !v.SecureBootRed {
+			t.Fatalf("%s: %+v", mode, v.SecureBoot)
+		}
+		var list []server.RequestView
+		if code, msg := e.adminDo("GET", "/v1/requests", nil, &list); code != 200 || len(list) != 0 {
+			t.Fatalf("an operator is asked about what is refused: %d %s %+v", code, msg, list)
+		}
+	}
+}
+
+// The approvals are of PCR 7's value: a state that moved it is refused until the signing
+// key approves it. Once it does, with Secure Boot off, the approval verifies and the
+// state refuses. What was refused is still shown.
 func TestChangedPCR7IsRefusedAndShown(t *testing.T) {
 	e := newEnv(t)
 	m := e.machine(0)
@@ -716,26 +753,25 @@ func TestChangedPCR7IsRefusedAndShown(t *testing.T) {
 		t.Fatalf("the audit: %+v", last)
 	}
 	m.Approve()
-	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
-	if v := e.deviceView(m); !v.SecureBootRed {
-		t.Fatalf("approved with Secure Boot off: %+v", v.SecureBoot)
-	}
+	wantStatus(t, e.release(m), vaultproto.StatusDenied, "Secure Boot OFF")
 }
 
-// An operator sees the state on the request, before approving.
+// An operator sees the state on the request before approving. Only on reaches the queue:
+// an operator is not asked about what would be refused.
 func TestRequestShowsSecureBoot(t *testing.T) {
 	e := newEnv(t)
 	m := e.machine(vaultproto.ModeApprove)
-	m.TPM.SetSecureBoot(attest.SecureBootSetupMode)
-	m.Approve()
 	wantStatus(t, e.release(m), vaultproto.StatusPending, "")
 	var list []server.RequestView
 	if code, msg := e.adminDo("GET", "/v1/requests", nil, &list); code != 200 || len(list) != 1 {
 		t.Fatalf("requests: %d %s %d", code, msg, len(list))
 	}
-	if list[0].SecureBoot.State != attest.SecureBootSetupMode || !list[0].SecureBootRed {
+	if list[0].SecureBoot.State != attest.SecureBootOn || list[0].SecureBootRed {
 		t.Fatalf("the request: %+v", list[0])
 	}
+	m.TPM.SetSecureBoot(attest.SecureBootSetupMode)
+	m.Approve()
+	wantStatus(t, e.release(m), vaultproto.StatusDenied, "SETUP MODE")
 }
 
 func (e *env) deviceView(m *vaulttest.Machine) *server.DeviceView {
