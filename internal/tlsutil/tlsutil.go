@@ -1,5 +1,13 @@
-// Package tlsutil makes and loads the vault's TLS key, and checks a pin the
-// way a machine does.
+// Package tlsutil makes and serves the vault's TLS: a root of its own and a
+// leaf it signs, and the client's side of it.
+//
+// The root (ECDSA P-256, 20 years) is the vault's identity: machines and
+// operators verify the vault's chain against it, and the pin a machine
+// keeps (vaultproto.PinOf) is its key. The leaf (1 year, the vault's host
+// name or address) is what the vault serves, with the root; it is made
+// again from the root once fewer than renewBefore are left - at start and
+// while serving - so that a vault running for a year goes on being
+// verified, without a machine enrolling again.
 package tlsutil
 
 import (
@@ -9,15 +17,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
@@ -25,117 +32,228 @@ import (
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
 )
 
-// Generate makes an ECDSA P-256 key and a self-signed certificate for host,
-// valid 100 years: machines pin its key (vaultproto.PinOf) and check
-// neither its chain nor its dates.
-func Generate(host string, now time.Time) (keyPEM, certPEM []byte, err error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+const (
+	rootValidity = 20 // years
+	leafValidity = 1  // year
+	// renewBefore: a leaf with less left is made again from the root.
+	renewBefore = 30 * 24 * time.Hour
+)
+
+// Write makes the vault's root and a leaf for host in the state directory.
+func Write(d state.Dir, host string, now time.Time) error {
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	serial, err := newSerial()
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: host},
+		Subject:               pkix.Name{CommonName: "tpm2-kira-vault root, " + host},
 		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.AddDate(100, 0, 0),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		NotAfter:              now.AddDate(rootValidity, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLenZero:        true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		return err
+	}
+	root, err := x509.ParseCertificate(der)
+	if err != nil {
+		return err
+	}
+	kder, err := x509.MarshalECPrivateKey(rootKey)
+	if err != nil {
+		return err
+	}
+	if err := state.WriteFile(d.TLSRootKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})); err != nil {
+		return err
+	}
+	if err := state.WriteFile(d.TLSRootPath(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
+		return err
+	}
+	_, err = writeLeaf(d, root, rootKey, host, now)
+	return err
+}
+
+// writeLeaf makes a leaf for host, signed by the root, and stores it.
+func writeLeaf(d state.Dir, root *x509.Certificate, rootKey *ecdsa.PrivateKey, host string, now time.Time) (*tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := newSerial()
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: host},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.AddDate(leafValidity, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		tmpl.IPAddresses = []net.IP{ip}
-	} else if host != "" {
+	} else {
 		tmpl.DNSNames = []string{host}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, root, &key.PublicKey, rootKey)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	kder, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+	if err := state.WriteFile(d.TLSKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})); err != nil {
+		return nil, err
+	}
+	if err := state.WriteFile(d.TLSCertPath(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
+		return nil, err
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Certificate{Certificate: [][]byte{der, root.Raw}, PrivateKey: key, Leaf: leaf}, nil
 }
 
-// Write makes the key and certificate in the state directory.
-func Write(d state.Dir, host string, now time.Time) error {
-	k, c, err := Generate(host, now)
-	if err != nil {
-		return err
-	}
-	if err := state.WriteFile(d.TLSKeyPath(), k); err != nil {
-		return err
-	}
-	return state.WriteFile(d.TLSCertPath(), c)
+func newSerial() (*big.Int, error) {
+	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 }
 
-// Load reads the key and certificate of the state directory, and their pin.
-func Load(d state.Dir) (tls.Certificate, string, error) {
-	cert, err := tls.LoadX509KeyPair(d.TLSCertPath(), d.TLSKeyPath())
-	if err != nil {
-		return tls.Certificate{}, "", fmt.Errorf("the TLS key: %w", err)
-	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		return tls.Certificate{}, "", err
-	}
-	cert.Leaf = leaf
-	return cert, vaultproto.PinOf(leaf.RawSubjectPublicKeyInfo), nil
+// Certs is the vault's TLS as it serves it: the root, its key, and the
+// leaf, made again when it is due.
+type Certs struct {
+	d       state.Dir
+	root    *x509.Certificate
+	rootKey *ecdsa.PrivateKey
+	now     func() time.Time
+
+	mu   sync.Mutex
+	leaf *tls.Certificate
 }
 
-// Pin reads the certificate of the state directory and returns its pin.
-func Pin(d state.Dir) (string, error) {
-	b, err := os.ReadFile(d.TLSCertPath())
+// Load reads the vault's TLS from the state directory and makes the leaf
+// again when it is due (Renew).
+func Load(d state.Dir, now func() time.Time) (*Certs, error) {
+	root, err := readCert(d.TLSRootPath())
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("the vault's root: %w (a state directory of an earlier version: make it again with init)", err)
+	}
+	b, err := os.ReadFile(d.TLSRootKeyPath())
+	if err != nil {
+		return nil, fmt.Errorf("the vault's root key: %w", err)
 	}
 	blk, _ := pem.Decode(b)
 	if blk == nil {
-		return "", errors.New("the TLS certificate is not PEM")
+		return nil, errors.New("the vault's root key is not PEM")
 	}
-	c, err := x509.ParseCertificate(blk.Bytes)
+	rootKey, err := x509.ParseECPrivateKey(blk.Bytes)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("the vault's root key: %w", err)
 	}
-	return vaultproto.PinOf(c.RawSubjectPublicKeyInfo), nil
-}
-
-// CurlPin is a pin ("sha256:" and hex) as curl's --pinnedpubkey takes it:
-// "sha256//" and base64.
-func CurlPin(pin string) string {
-	raw, err := hex.DecodeString(strings.TrimPrefix(pin, "sha256:"))
+	cert, err := tls.LoadX509KeyPair(d.TLSCertPath(), d.TLSKeyPath())
 	if err != nil {
-		return ""
+		return nil, fmt.Errorf("the TLS key: %w", err)
 	}
-	return "sha256//" + base64.StdEncoding.EncodeToString(raw)
+	if cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
+		return nil, err
+	}
+	cert.Certificate = append(cert.Certificate[:1], root.Raw)
+	c := &Certs{d: d, root: root, rootKey: rootKey, now: now, leaf: &cert}
+	if _, err := c.Renew(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
-// ServerConfig is the machine-facing TLS configuration: TLS 1.3 only.
-func ServerConfig(cert tls.Certificate) *tls.Config {
-	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}
+func readCert(path string) (*x509.Certificate, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil || blk.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("%s holds no certificate", path)
+	}
+	return x509.ParseCertificate(blk.Bytes)
 }
 
-// PinnedConfig is a client's TLS configuration that accepts exactly the
-// server whose certificate's key has this pin, as a machine connects: no
-// chain, no dates, a failed pin is a refused connection.
-func PinnedConfig(pin string) *tls.Config {
-	return &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true, // replaced by VerifyConnection: the pin is the whole check
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
-				return errors.New("the vault sent no certificate")
-			}
-			if got := vaultproto.PinOf(cs.PeerCertificates[0].RawSubjectPublicKeyInfo); got != pin {
-				return fmt.Errorf("the vault's key has pin %s, not %s", got, pin)
-			}
-			return nil
-		},
+// Renew makes the leaf again from the root when fewer than renewBefore are
+// left, for the same name or address, and says whether it did.
+func (c *Certs) Renew() (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if c.leaf.Leaf.NotAfter.Sub(now) > renewBefore {
+		return false, nil
 	}
+	host := c.leaf.Leaf.Subject.CommonName
+	leaf, err := writeLeaf(c.d, c.root, c.rootKey, host, now)
+	if err != nil {
+		return false, fmt.Errorf("making the TLS leaf again: %w", err)
+	}
+	c.leaf = leaf
+	return true, nil
+}
+
+// Pin is the root's pin: what a machine keeps of the vault.
+func (c *Certs) Pin() string { return vaultproto.PinOf(c.root.RawSubjectPublicKeyInfo) }
+
+// RootPEM is the root's certificate, for machines and operators.
+func (c *Certs) RootPEM() []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.root.Raw})
+}
+
+// Leaf is the leaf served now.
+func (c *Certs) Leaf() *x509.Certificate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.leaf.Leaf
+}
+
+// ServerConfig is the vault's TLS configuration: TLS 1.3, leaf and root,
+// the leaf made again when it is due.
+func (c *Certs) ServerConfig() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if _, err := c.Renew(); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.leaf, nil
+	}}
+}
+
+// RootPEMOf reads the root's certificate from the state directory, as
+// 'tls root' prints it.
+func RootPEMOf(d state.Dir) ([]byte, error) {
+	root, err := readCert(d.TLSRootPath())
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}), nil
+}
+
+// ClientConfig is a client's TLS configuration for the vault at vaultURL:
+// the chain to the vault's root (PEM), then the pin - as a machine
+// verifies it (vaultproto.ClientConfig).
+func ClientConfig(vaultURL string, rootPEM []byte, pin string) (*tls.Config, error) {
+	u, err := url.Parse(vaultURL)
+	if err != nil {
+		return nil, err
+	}
+	roots, _, err := vaultproto.ParseRoots(rootPEM)
+	if err != nil {
+		return nil, err
+	}
+	return vaultproto.ClientConfig(roots, u.Hostname(), pin), nil
 }

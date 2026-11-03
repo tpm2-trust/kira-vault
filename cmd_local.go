@@ -105,10 +105,11 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err := tlsutil.Write(d, u.Hostname(), now); err != nil {
 		return err
 	}
-	pin, err := tlsutil.Pin(d)
+	certs, err := tlsutil.Load(d, func() time.Time { return now })
 	if err != nil {
 		return err
 	}
+	pin := certs.Pin()
 	rk, err := keys.NewRecoveryKey()
 	if err != nil {
 		return err
@@ -127,7 +128,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "Initialised the vault in %s.\n\n", *dir)
-	fmt.Fprintf(stdout, "  URL:   %s\n  pin:   %s  (for curl: %s)\n  PCRs:  %s (SHA-256)\n  TPM:   %s\n", cfg.URL, pin, tlsutil.CurlPin(pin), formatPCRs(pcrs), cfg.TPM)
+	fmt.Fprintf(stdout, "  URL:   %s\n  pin:   %s  (its root's key)\n  root:  tpm2-kira-vault tls root   (for the machines' %s, and curl --cacert)\n  PCRs:  %s (SHA-256)\n  TPM:   %s\n", cfg.URL, pin, "/etc/tpm2-kira/vault-ca.pem", formatPCRs(pcrs), cfg.TPM)
 	if u := server.OperatorURL(cfg); u != "" {
 		fmt.Fprintf(stdout, "  operator interface: %s (tokens: tpm2-kira-vault operator add NAME)\n", u)
 	}
@@ -182,10 +183,11 @@ func serve(ctx context.Context, d state.Dir, stderr io.Writer, ready chan<- stru
 	if err != nil {
 		return err
 	}
-	cert, pin, err := tlsutil.Load(d)
+	certs, err := tlsutil.Load(d, time.Now)
 	if err != nil {
 		return err
 	}
+	pin := certs.Pin()
 	audit, err := state.OpenAudit(d.AuditPath(), nil)
 	if err != nil {
 		return err
@@ -205,7 +207,7 @@ func serve(ctx context.Context, d state.Dir, stderr io.Writer, ready chan<- stru
 	}
 	machine := &http.Server{
 		Handler:           srv.MachineHandler(),
-		TLSConfig:         tlsutil.ServerConfig(cert),
+		TLSConfig:         certs.ServerConfig(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -244,7 +246,7 @@ func serve(ctx context.Context, d state.Dir, stderr io.Writer, ready chan<- stru
 		}
 		operator = &http.Server{
 			Handler:           srv.OperatorHandler(),
-			TLSConfig:         tlsutil.ServerConfig(cert),
+			TLSConfig:         certs.ServerConfig(),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      30 * time.Second,
@@ -303,6 +305,28 @@ func checkOperatorListen(addr, listen string) error {
 
 // cmdConfig changes config.json. It refuses while serve runs, which reads
 // the configuration at its start.
+// cmdTLS is 'tls root': the vault's root certificate, for the machines'
+// /etc/tpm2-kira/vault-ca.pem (luks enrol --ca FILE) and operators' curl
+// --cacert. It only reads, also while serve runs.
+func cmdTLS(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("tls", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("dir", state.DefaultDir, "state directory")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 || pos[0] != "root" {
+		return errors.New("usage: tpm2-kira-vault tls root [--dir DIR]")
+	}
+	b, err := tlsutil.RootPEMOf(state.Dir{Path: *dir})
+	if err != nil {
+		return err
+	}
+	_, err = stdout.Write(b)
+	return err
+}
+
 func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	fs.SetOutput(stderr)

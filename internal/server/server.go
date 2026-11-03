@@ -20,6 +20,9 @@
 //     operator unlocks it;
 //   - at most RateLimit challenges per device per RateWindow;
 //   - the highest verified generation is kept, a lower one is refused;
+//   - nothing is released unless the quote establishes Secure Boot on (PCR 7 and its
+//     events replayed): off, Setup Mode and not established, a selection without
+//     PCR 7 among them, are refused, audited and shown, whatever an approval says;
 //   - every enrolment, challenge, verification, release, denial and admin
 //     action goes to the audit log.
 //
@@ -407,6 +410,10 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 	if err != nil {
 		return nil, err
 	}
+	rkName, err := req.ReleaseKeyName()
+	if err != nil {
+		return nil, refuse(http.StatusBadRequest, "the enrolment request: "+err.Error())
+	}
 	mode := e.token.Mode
 	if req.Pepper {
 		mode = vaultproto.ModeApprove
@@ -420,11 +427,13 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		PepperRequired:      req.Pepper,
 		EKPublic:            req.EKPublic,
 		EKCert:              req.EKCert,
+		ReleaseKeyName:      rkName,
 		AKPublic:            pinned.AKPublic,
 		SigningPublic:       pinned.SigningPublic,
 		PolicyRef:           pinned.PolicyRef,
 		GenerationIndexName: pinned.GenerationIndexName,
 		Selection:           pinned.Selection,
+		PCRKey:              pinned.PCRKey,
 		MinGeneration:       req.Generation,
 		EnrolledAt:          now.UTC(),
 		Remote:              encRemote,
@@ -540,9 +549,6 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		res, err = s.release(&req, r.RemoteAddr)
 	}
 	s.answer(w, res, err)
-	if res != nil {
-		clear(res.Pepper)
-	}
 }
 
 func requestDigest(req *vaultproto.ReleaseRequest) []byte {
@@ -611,6 +617,17 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 	}
 
 	checked, verr := vaultproto.VerifyRelease(d.Pinned(), q.nonce, req, d.MinGeneration)
+	if checked != nil {
+		// What the verified quote says of the boot, for the device's view and the
+		// audit, also of a release refused below.
+		entry.SecureBoot, entry.SecureBootRed = checked.SecureBoot.String(), checked.SecureBoot.Red()
+		t := now.UTC()
+		sb := checked.SecureBoot
+		d.SecureBoot, d.SecureBootAt = &sb, &t
+		if err := s.dir.SaveDevice(d); err != nil {
+			return nil, err
+		}
+	}
 	if verr != nil {
 		d.Failures++
 		reason := verr.Error()
@@ -631,6 +648,13 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		}
 	}
 
+	// No per-device exception: the boot chain's signatures are what the approvals'
+	// values rest on. A verified quote, so no failure of the device; an operator is not
+	// asked about what would be refused.
+	if checked.SecureBoot.State != attest.SecureBootOn {
+		return deny(checked.SecureBoot.String() + ": this vault releases only to a boot with Secure Boot on")
+	}
+
 	if q.state == fresh && (d.Mode == vaultproto.ModeApprove || d.PepperRequired) {
 		q.state = pending
 		q.digest = requestDigest(req)
@@ -645,6 +669,9 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 
 	if d.PepperRequired && len(q.pepper) == 0 { // decide refuses such an approval; this keeps it so
 		return deny("this device was enrolled with a pepper, and the approval carries none")
+	}
+	if d.PepperRequired && len(d.ReleaseKeyName) == 0 {
+		return deny("this device was enrolled before peppers were wrapped for its TPM: enrol it again")
 	}
 
 	kdev, err := s.sealer.Unseal(&d.Sealed)
@@ -683,12 +710,14 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		entry.Detail += ", approved by " + q.actor
 	}
 	if d.PepperRequired {
-		res.Pepper = append([]byte(nil), q.pepper...)
+		if res.Pepper, err = vaultproto.WrapPepper(rand.Reader, d.EKPublic, d.ReleaseKeyName, d.ID, q.pepper); err != nil {
+			s.log.Printf("device %s: wrapping the pepper: %v", dev, err)
+			return deny("the vault could not wrap the pepper for the device's TPM")
+		}
 		entry.Detail += ", with a pepper"
 	}
 	s.forget(q)
 	if err := s.logAudit(entry); err != nil {
-		clear(res.Pepper)
 		return nil, err
 	}
 	return res, nil

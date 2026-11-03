@@ -10,6 +10,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,7 +39,9 @@ type Machine struct {
 	Approval  []byte
 	Pepper    bool               // the keyslot is enrolled with an operator's pepper
 	R         []byte             // the remote part in the clear, as the machine drew it
-	Remote    vaultproto.Wrapped // R wrapped for the TPM (EK and the AK's name stand in for the release key)
+	Remote    vaultproto.Wrapped // R wrapped for the TPM: its EK and the slot's release key
+	RKPublic  []byte             // the slot's release key (TPMT_PUBLIC)
+	RKName    []byte             // and its Name
 }
 
 // NewMachine makes a machine whose signing key approved its PCRs at
@@ -62,7 +65,10 @@ func NewMachine(name string) (*Machine, error) {
 	}
 	rand.Read(m.DeviceID)
 	rand.Read(m.R)
-	cred, enc, err := attest.MakeCredential(rand.Reader, s.EKPub, s.AKName, m.R)
+	if m.RKPublic, m.RKName, err = s.ReleaseKey(m.SigningPublic(), m.PolicyRef); err != nil {
+		return nil, err
+	}
+	cred, enc, err := attest.MakeCredential(rand.Reader, s.EKPub, m.RKName, m.R)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +117,7 @@ func (m *Machine) EnrolRequest(token string) *vaultproto.EnrolRequest {
 		EKPublic: m.TPM.EKPub, AKPublic: m.TPM.AKPub,
 		SigningPublic: m.SigningPublic(), PolicyRef: m.PolicyRef, GenerationIndexName: m.GenIndex,
 		Generation: m.Gen, Selection: m.Selection, Remote: m.Remote, Label: "root", Pepper: m.Pepper,
+		ReleaseKeyPublic: m.RKPublic,
 	}
 }
 
@@ -123,7 +130,7 @@ func (m *Machine) ReleaseRequest(ch *vaultproto.ChallengeResponse) (*vaultproto.
 	}
 	req := &vaultproto.ReleaseRequest{
 		RequestID: ch.RequestID, DeviceID: m.DeviceID, Quoted: q.Quoted, QuoteSignature: q.Signature,
-		Generation: m.Gen, ApprovalSignature: m.Approval,
+		Generation: m.Gen, ApprovalSignature: m.Approval, PCR7Chain: m.TPM.PCR7Chain,
 	}
 	for _, v := range q.Values {
 		req.PCRValues = append(req.PCRValues, vaultproto.PCRValue{Index: v.Index, Value: v.Digest})
@@ -138,10 +145,16 @@ type Client struct {
 }
 
 // NewClient pins the vault's key as tpm2-kira does.
-func NewClient(url, pin string) *Client {
+// NewClient verifies the vault's chain against root (PEM) and then the
+// pin, as a machine does.
+func NewClient(url string, root []byte, pin string) *Client {
+	cfg, err := tlsutil.ClientConfig(url, root, pin)
+	if err != nil {
+		panic(err) // a test's root that does not parse
+	}
 	return &Client{URL: url, HTTP: &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsutil.PinnedConfig(pin)},
+		Transport: &http.Transport{TLSClientConfig: cfg},
 	}}
 }
 
@@ -229,7 +242,21 @@ func (m *Machine) Release(c *Client) (*vaultproto.ReleaseRequest, *vaultproto.Re
 // Open opens a released remote part with the machine's TPM, as the
 // machine's ActivateCredential does.
 func (m *Machine) Open(w *vaultproto.Wrapped) ([]byte, error) {
-	return m.TPM.ActivateCredential(w.Credential, w.EncryptedSecret)
+	return m.TPM.ActivateCredentialFor(m.RKName, w.Credential, w.EncryptedSecret)
+}
+
+// OpenPepper opens the pepper a release carries, as the machine's TPM does:
+// its key with the release key, then the pepper.
+func (m *Machine) OpenPepper(w *vaultproto.WrappedPepper) (string, error) {
+	if w == nil {
+		return "", errors.New("no pepper")
+	}
+	k, err := m.Open(&w.Key)
+	if err != nil {
+		return "", err
+	}
+	p, err := vaultproto.OpenPepper(k, m.DeviceID, w)
+	return string(p), err
 }
 
 // Operator is an operator's client of the operator interface, as curl
@@ -241,8 +268,8 @@ type Operator struct {
 }
 
 // NewOperator pins the vault's key and sends token.
-func NewOperator(url, pin, token string) *Operator {
-	return &Operator{URL: url, Token: token, HTTP: NewClient(url, pin).HTTP}
+func NewOperator(url string, root []byte, pin, token string) *Operator {
+	return &Operator{URL: url, Token: token, HTTP: NewClient(url, root, pin).HTTP}
 }
 
 // Do sends body (raw JSON, or nothing) and returns the status and the

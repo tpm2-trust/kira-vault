@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
 )
 
 // The operator interface: a subset of the admin handlers on HTTPS, for
@@ -43,10 +42,9 @@ type OperatorAdded struct {
 	Name    string    `json:"name"`
 	Created time.Time `json:"created"`
 	Token   string    `json:"token"`
-	URL     string    `json:"url,omitempty"` // the operator interface's URL; empty while it is off
-	Pin     string    `json:"pin"`
-	CurlPin string    `json:"curl_pin"` // the pin as curl's --pinnedpubkey takes it
-	Example string    `json:"example,omitempty"`
+	URL     string    `json:"url,omitempty"`     // the operator interface's URL; empty while it is off
+	Pin     string    `json:"pin"`               // the vault's root's key
+	Example string    `json:"example,omitempty"` // curl, verifying against the vault's root ('tls root')
 }
 
 // OperatorHandler serves the operator interface: requests, approvals,
@@ -188,9 +186,9 @@ func (s *Server) addOperator(name string) (*OperatorAdded, error) {
 	if err := s.logAudit(state.Entry{Event: "operator-add", Name: name, Actor: "admin", Result: "done"}); err != nil {
 		return nil, err
 	}
-	res := &OperatorAdded{Name: name, Created: o.Created, Token: token, URL: OperatorURL(s.cfg), Pin: s.pin, CurlPin: tlsutil.CurlPin(s.pin)}
+	res := &OperatorAdded{Name: name, Created: o.Created, Token: token, URL: OperatorURL(s.cfg), Pin: s.pin}
 	if res.URL != "" {
-		res.Example = fmt.Sprintf("curl -k --pinnedpubkey %s -H 'Authorization: Bearer %s' %s/v1/requests", res.CurlPin, token, res.URL)
+		res.Example = fmt.Sprintf("curl --cacert vault-ca.pem -H 'Authorization: Bearer %s' %s/v1/requests", token, res.URL)
 	}
 	return res, nil
 }

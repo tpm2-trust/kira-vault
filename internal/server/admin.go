@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
@@ -24,19 +25,24 @@ import (
 
 // DeviceView is a device as the operator sees it: no keys.
 type DeviceView struct {
-	ID            string               `json:"device_id"`
-	Name          string               `json:"name"`
-	Label         string               `json:"label"`
-	Mode          string               `json:"mode"`
-	Pepper        bool                 `json:"pepper"` // releases need an approval with the operator's pepper
-	MinGeneration uint64               `json:"min_generation"`
-	Revoked       bool                 `json:"revoked"`
-	Locked        bool                 `json:"locked"`
-	Failures      int                  `json:"failures"`
-	EnrolledAt    time.Time            `json:"enrolled_at"`
-	LastRelease   *time.Time           `json:"last_release,omitempty"`
-	Selection     vaultproto.Selection `json:"selection"`
-	VaultPCRs     []uint8              `json:"vault_pcrs"` // the vault PCRs its key is sealed to
+	ID            string                 `json:"device_id"`
+	Name          string                 `json:"name"`
+	Label         string                 `json:"label"`
+	Mode          vaultproto.ReleaseMode `json:"mode"`
+	Pepper        bool                   `json:"pepper"` // releases need an approval with the operator's pepper
+	MinGeneration uint64                 `json:"min_generation"`
+	Revoked       bool                   `json:"revoked"`
+	Locked        bool                   `json:"locked"`
+	Failures      int                    `json:"failures"`
+	EnrolledAt    time.Time              `json:"enrolled_at"`
+	LastRelease   *time.Time             `json:"last_release,omitempty"`
+	Selection     vaultproto.Selection   `json:"selection"`
+	VaultPCRs     []uint8                `json:"vault_pcrs"` // the vault PCRs its key is sealed to
+	// SecureBoot is what the last verified quote established; not established before
+	// the first. SecureBootRed marks every state but on.
+	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
+	SecureBootRed bool                     `json:"secure_boot_red"`
+	SecureBootAt  *time.Time               `json:"secure_boot_at,omitempty"`
 }
 
 // RequestView is a pending release request.
@@ -52,11 +58,15 @@ type RequestView struct {
 	Remote     string                `json:"remote"`
 	Generation uint64                `json:"generation"`
 	PCRValues  []vaultproto.PCRValue `json:"pcr_values"`
+	// SecureBoot is what this request's quote established. SecureBootRed marks
+	// every state but on: an operator sees it before approving.
+	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
+	SecureBootRed bool                     `json:"secure_boot_red"`
 }
 
 // ModeRequest is the body of POST /v1/devices/{id}/mode.
 type ModeRequest struct {
-	Mode string `json:"mode"`
+	Mode vaultproto.ReleaseMode `json:"mode"`
 }
 
 // ApproveRequest is the body of POST /v1/requests/{id}/approve. Pepper is
@@ -68,21 +78,21 @@ type ApproveRequest struct {
 
 // TokenRequest is the body of POST /v1/tokens.
 type TokenRequest struct {
-	Name       string `json:"name"`
-	Mode       string `json:"mode"`        // auto when empty
-	TTLSeconds int    `json:"ttl_seconds"` // an hour when 0
-	Replace    string `json:"replace,omitempty"`
+	Name       string                 `json:"name"`
+	Mode       vaultproto.ReleaseMode `json:"mode"`        // auto when 0
+	TTLSeconds int                    `json:"ttl_seconds"` // an hour when 0
+	Replace    string                 `json:"replace,omitempty"`
 }
 
 // TokenResponse is a created token: shown once, stored only as its hash.
 type TokenResponse struct {
-	Token   string    `json:"token"`
-	Name    string    `json:"name"`
-	Mode    string    `json:"mode"`
-	Expires time.Time `json:"expires"`
-	URL     string    `json:"url"`
-	Pin     string    `json:"pin"`
-	Command string    `json:"command"` // to run on the machine
+	Token   string                 `json:"token"`
+	Name    string                 `json:"name"`
+	Mode    vaultproto.ReleaseMode `json:"mode"`
+	Expires time.Time              `json:"expires"`
+	URL     string                 `json:"url"`
+	Pin     string                 `json:"pin"`
+	Command string                 `json:"command"` // to run on the machine
 }
 
 // DefaultTokenTTL is a token's validity when none is asked for.
@@ -112,7 +122,12 @@ func (s *Server) AdminHandler() http.Handler {
 }
 
 func viewOf(d *state.Device) DeviceView {
+	sb := attest.SecureBootFinding{State: attest.SecureBootNotEstablished, Detail: "no verified quote yet: the device has not asked for a release"}
+	if d.SecureBoot != nil {
+		sb = *d.SecureBoot
+	}
 	return DeviceView{
+		SecureBoot: sb, SecureBootRed: sb.Red(), SecureBootAt: d.SecureBootAt,
 		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired,
 		MinGeneration: d.MinGeneration, Revoked: d.Revoked, Locked: d.Locked, Failures: d.Failures,
 		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection, VaultPCRs: d.Sealed.PCRs,
@@ -184,7 +199,7 @@ func (s *Server) changeDevice(ref, event, actor string, change func(*state.Devic
 	}
 	detail := ""
 	if event == "mode" {
-		detail = d.Mode
+		detail = d.Mode.String()
 	}
 	if err := s.logAudit(state.Entry{Event: event, Device: hex.EncodeToString(d.ID), Name: d.Name, Actor: actor, Result: "done", Detail: detail}); err != nil {
 		return nil, err
@@ -208,9 +223,9 @@ func (s *Server) adminSetFlag(event string, set func(*state.Device)) http.Handle
 	}
 }
 
-func checkMode(m string) error {
-	if m != vaultproto.ModeAuto && m != vaultproto.ModeApprove {
-		return fail(http.StatusBadRequest, "mode %q: auto or approve", m)
+func checkMode(m vaultproto.ReleaseMode) error {
+	if err := m.Check(); err != nil {
+		return fail(http.StatusBadRequest, "%v", err)
 	}
 	return nil
 }
@@ -252,6 +267,7 @@ func (s *Server) adminRequests(w http.ResponseWriter, r *http.Request) {
 		}
 		if q.checked != nil {
 			v.Generation, v.PCRValues = q.checked.Generation, q.checked.PCRValues
+			v.SecureBoot, v.SecureBootRed = q.checked.SecureBoot, q.checked.SecureBoot.Red()
 		}
 		views = append(views, v)
 	}
@@ -356,7 +372,7 @@ func (s *Server) createToken(t *TokenRequest) (*TokenResponse, error) {
 	if t.Name == "" {
 		return nil, fail(http.StatusBadRequest, "a token needs a name")
 	}
-	if t.Mode == "" {
+	if t.Mode == 0 {
 		t.Mode = vaultproto.ModeAuto
 	}
 	if err := checkMode(t.Mode); err != nil {

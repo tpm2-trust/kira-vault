@@ -21,6 +21,11 @@ type Entry struct {
 	Actor   string    `json:"actor,omitempty"`  // "admin" for the admin interface
 	Result  string    `json:"result,omitempty"`
 	Detail  string    `json:"detail,omitempty"`
+	// SecureBoot is what the request's verified quote and event log established
+	// (attest.SecureBootFinding's words); empty without a verified quote.
+	SecureBoot string `json:"secure_boot,omitempty"`
+	// SecureBootRed marks every state but on.
+	SecureBootRed bool `json:"secure_boot_red,omitempty"`
 }
 
 // Audit is the append-only audit log. Each line is synced to disk before

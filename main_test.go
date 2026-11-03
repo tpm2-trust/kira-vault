@@ -12,12 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
 )
 
@@ -28,6 +28,7 @@ type vault struct {
 	sock     string
 	url      string
 	pin      string
+	root     []byte // the vault's root, as 'tls root' prints it
 	recovery string
 	stop     func()
 }
@@ -73,6 +74,11 @@ func initVault(t *testing.T, extra ...string) *vault {
 		t.Fatalf("init output:\n%s", out)
 	}
 	v.pin, v.recovery = m[1], r[1]
+	root, err := cli(t, "", "tls", "root", "--dir", v.dir)
+	if err != nil || !strings.HasPrefix(root, "-----BEGIN CERTIFICATE-----") {
+		t.Fatalf("tls root: %v\n%s", err, root)
+	}
+	v.root = []byte(root)
 	return v
 }
 
@@ -117,10 +123,10 @@ func (v *vault) operator(name string) *vaulttest.Operator {
 	}
 	cfg, _ := state.Dir{Path: v.dir}.Config()
 	u := server.OperatorURL(cfg)
-	if !strings.Contains(out, "curl -k --pinnedpubkey "+tlsutil.CurlPin(v.pin)+" -H 'Authorization: Bearer "+m[1]+"' "+u+"/v1/requests") {
+	if !strings.Contains(out, "curl --cacert vault-ca.pem -H 'Authorization: Bearer "+m[1]+"' "+u+"/v1/requests") {
 		v.t.Fatalf("operator add output:\n%s", out)
 	}
-	return vaulttest.NewOperator(u, v.pin, m[1])
+	return vaulttest.NewOperator(u, v.root, v.pin, m[1])
 }
 
 // approve approves the machine's pending request over the operator
@@ -140,7 +146,7 @@ func approve(t *testing.T, v *vault, o *vaulttest.Operator, m *vaulttest.Machine
 	return res
 }
 
-func (v *vault) client() *vaulttest.Client { return vaulttest.NewClient(v.url, v.pin) }
+func (v *vault) client() *vaulttest.Client { return vaulttest.NewClient(v.url, v.root, v.pin) }
 
 // enrol creates a token with the CLI and enrols a machine with it.
 func (v *vault) enrol(name string) *vaulttest.Machine { return v.enrolWith(name, false) }
@@ -218,6 +224,7 @@ func TestCommands(t *testing.T) {
 	if err != nil || !strings.Contains(out, "db-03") || !strings.Contains(out, "active") {
 		t.Fatalf("devices: %v\n%s", err, out)
 	}
+	secureBootInTheCLI(t, v, m)
 	if out, err = cli(t, "", "device", "revoke", "db-03", "--socket", v.sock); err != nil || !strings.Contains(out, "revoked") {
 		t.Fatalf("revoke: %v\n%s", err, out)
 	}
@@ -277,7 +284,7 @@ func TestCommands(t *testing.T) {
 		t.Fatalf("config set while serving: %v", err)
 	}
 	out, err = cli(t, "", "operator", "add", "alice", "--socket", v.sock)
-	if err != nil || !strings.Contains(out, "The operator interface is off") || !strings.Contains(out, tlsutil.CurlPin(v.pin)) {
+	if err != nil || !strings.Contains(out, "The operator interface is off") || !strings.Contains(out, "tls root > vault-ca.pem") {
 		t.Fatalf("operator add while off: %v\n%s", err, out)
 	}
 	cli(t, "", "operator", "remove", "alice", "--socket", v.sock)
@@ -303,8 +310,8 @@ func TestCommands(t *testing.T) {
 	}
 	res = approve(t, v, alice, p, `{"pepper":"s3cret"}`)
 	wantReleased(t, p, res)
-	if string(res.Pepper) != "s3cret" {
-		t.Fatalf("released pepper %q", res.Pepper)
+	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "s3cret" {
+		t.Fatalf("released pepper %q: %v", got, err)
 	}
 	if out, err := cli(t, "", "audit", "--socket", v.sock); err != nil || !strings.Contains(out, "approve  done  "+hex.EncodeToString(p.DeviceID)+" (db-04)") || !strings.Contains(out, "by alice") || strings.Contains(out, "s3cret") {
 		t.Fatalf("audit: %v\n%s", err, out)
@@ -343,4 +350,111 @@ func TestParsePCRs(t *testing.T) {
 	if out, err := cli(t, "", "help"); err != nil || !strings.Contains(out, "token create") {
 		t.Fatalf("help: %v", err)
 	}
+}
+
+// The queue answered on the vault's CLI: 'request approve' asks a pepper
+// device's pepper and sends it with the approval; 'requests answer' goes
+// through what waits - deny, skip, approve with the pepper - and says when
+// nothing does.
+func TestCLIAnswersTheQueue(t *testing.T) {
+	useSealer(t, vaulttest.NewSealer())
+	v := initVault(t)
+	v.start()
+	defer v.stop()
+	p := v.enrolWith("db-05", true)
+	pending := func() *vaultproto.ReleaseRequest {
+		t.Helper()
+		req, res, err := p.Release(v.client())
+		if err != nil || res.Status != vaultproto.StatusPending {
+			t.Fatalf("not pending: %v %+v", err, res)
+		}
+		return req
+	}
+
+	if out, err := cli(t, "", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "No release waits") {
+		t.Fatalf("an empty queue: %v\n%s", err, out)
+	}
+
+	req := pending()
+	if _, err := cli(t, "\n", "request", "approve", req.RequestID, "--socket", v.sock); err == nil || !strings.Contains(err.Error(), "pepper") {
+		t.Fatalf("an approval without the pepper: %v", err)
+	}
+	if out, err := cli(t, "s3cret pepper\n", "request", "approve", req.RequestID, "--socket", v.sock); err != nil || !strings.Contains(out, "approved") {
+		t.Fatalf("request approve: %v\n%s", err, out)
+	}
+	res, err := v.client().Send(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReleased(t, p, res)
+	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "s3cret pepper" {
+		t.Fatalf("the pepper the CLI sent: %q %v", got, err)
+	}
+
+	// The queue, one by one: skipped stays, denied is denied, approved with
+	// the pepper is released.
+	req = pending()
+	if out, err := cli(t, "s\n", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "db-05") || !strings.Contains(out, "with a pepper") || !strings.Contains(out, "skipped") {
+		t.Fatalf("skip: %v\n%s", err, out)
+	}
+	if out, err := cli(t, "x\nd\n", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "denied") {
+		t.Fatalf("deny: %v\n%s", err, out)
+	}
+	if res, _ := v.client().Send(req); res == nil || res.Status != vaultproto.StatusDenied {
+		t.Fatalf("after the denial: %+v", res)
+	}
+	req = pending()
+	if out, err := cli(t, "a\ns3cret pepper\n", "requests", "answer", "--socket", v.sock); err != nil || !strings.Contains(out, "approved") {
+		t.Fatalf("approve: %v\n%s", err, out)
+	}
+	res, err = v.client().Send(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReleased(t, p, res)
+	if out, err := cli(t, "", "audit", "--socket", v.sock); err != nil || strings.Contains(out, "s3cret") {
+		t.Fatalf("the audit: %v\n%s", err, out)
+	}
+}
+
+// The CLI's three places say Secure Boot's state; every state but on with the word
+// WARNING, for where there is no colour.
+func secureBootInTheCLI(t *testing.T, v *vault, m *vaulttest.Machine) {
+	t.Helper()
+	for _, tc := range []struct {
+		state, table, line string
+	}{
+		{attest.SecureBootOn, " on\n", "secure boot:     Secure Boot on"},
+		{attest.SecureBootOff, "OFF\n", "secure boot:     WARNING: Secure Boot OFF"},
+		{attest.SecureBootSetupMode, "SETUP-MODE\n", "secure boot:     WARNING: Secure Boot in SETUP MODE"},
+		{"no log", "NOT-ESTABLISHED\n", "secure boot:     WARNING: Secure Boot NOT ESTABLISHED"},
+	} {
+		if tc.state == "no log" {
+			m.TPM.PCR7Chain = nil
+		} else {
+			m.TPM.SetSecureBoot(tc.state)
+		}
+		m.Approve()
+		if res := v.release(m); tc.state == attest.SecureBootOn {
+			wantReleased(t, m, res)
+		} else if res.Status != vaultproto.StatusDenied || !strings.Contains(res.Reason, "this vault releases only to a boot with Secure Boot on") {
+			t.Errorf("%s: %s, %s", tc.state, res.Status, res.Reason)
+		}
+		out, err := cli(t, "", "devices", "--dir", v.dir)
+		if err != nil || !strings.Contains(out, tc.table) {
+			t.Errorf("%s: devices: %v\n%s", tc.state, err, out)
+		}
+		if out, err = cli(t, "", "device", "show", "db-03", "--socket", v.sock); err != nil || !strings.Contains(out, tc.line) {
+			t.Errorf("%s: device show: %v\n%s", tc.state, err, out)
+		}
+		out, err = cli(t, "", "audit", "--socket", v.sock)
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		last := lines[len(lines)-1]
+		on := tc.state == attest.SecureBootOn
+		if err != nil || strings.Contains(last, "released") != on || strings.Contains(last, "denied") == on || strings.Contains(last, "WARNING") == on {
+			t.Errorf("%s: audit: %v\n%s", tc.state, err, last)
+		}
+	}
+	m.TPM.SetSecureBoot(attest.SecureBootOn)
+	m.Approve()
 }

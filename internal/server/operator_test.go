@@ -3,9 +3,7 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"io/fs"
-	"log"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,21 +14,14 @@ import (
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
 )
 
 // operatorURL starts the operator interface on its own TLS listener.
 func (e *env) operatorURL() string {
 	e.t.Helper()
-	cert, _, err := tlsutil.Load(e.dir)
-	if err != nil {
-		e.t.Fatal(err)
-	}
 	ts := httptest.NewUnstartedServer(e.srv.OperatorHandler())
-	ts.TLS = tlsutil.ServerConfig(cert)
-	ts.Config.ErrorLog = log.New(io.Discard, "", 0)
-	ts.StartTLS()
+	startVaultTLS(ts, e.certs)
 	e.t.Cleanup(ts.Close)
 	return ts.URL
 }
@@ -42,7 +33,7 @@ func (e *env) addOperator(name string) string {
 	if code, msg := e.adminDo("POST", "/v1/operators", server.OperatorRequest{Name: name}, &o); code != 200 {
 		e.t.Fatalf("operator add: %d %s", code, msg)
 	}
-	if o.Token == "" || o.CurlPin != tlsutil.CurlPin(e.pin) || !strings.HasPrefix(o.CurlPin, "sha256//") {
+	if o.Token == "" || o.Pin != e.pin {
 		e.t.Fatalf("operator added %+v", o)
 	}
 	return o.Token
@@ -74,6 +65,45 @@ func (e *env) grepState(s string) {
 	})
 }
 
+// The vault takes only the slot's own release key at enrolment - a pepper
+// is wrapped for it - and tells a pepper device enrolled before that to
+// enrol again, without the pepper.
+func TestPepperNeedsTheReleaseKey(t *testing.T) {
+	e := newEnv(t)
+	m, _ := vaulttest.NewMachine("db-05")
+	m.Pepper = true
+	other, _ := vaulttest.NewMachine("other")
+	own := m.RKPublic
+	m.RKPublic = other.RKPublic
+	if _, err := m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-05", Mode: vaultproto.ModeAuto})); err == nil || !strings.Contains(err.Error(), "release key") {
+		t.Fatalf("enrolled with another slot's release key: %v", err)
+	}
+	m.RKPublic = own
+	if _, err := m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-05", Mode: vaultproto.ModeAuto})); err != nil {
+		t.Fatal(err)
+	}
+	d := e.device(m)
+	if len(d.ReleaseKeyName) == 0 {
+		t.Fatal("the release key's Name is not kept")
+	}
+	d.ReleaseKeyName = nil
+	if err := e.dir.SaveDevice(d); err != nil {
+		t.Fatal(err)
+	}
+	req := e.pendingRequest(m)
+	if code, msg := e.adminDo("POST", "/v1/requests/"+req.RequestID+"/approve", map[string]any{"pepper": "p3pp3r"}, nil); code != 200 {
+		t.Fatalf("approve: %d %s", code, msg)
+	}
+	rel, err := e.client.Send(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, rel, vaultproto.StatusDenied, "enrol it again")
+	if rel.Pepper != nil || rel.Remote != nil {
+		t.Fatal("the denial carries the pepper or R")
+	}
+}
+
 func TestPepper(t *testing.T) {
 	e := newEnv(t)
 	m, _ := vaulttest.NewMachine("db-03")
@@ -85,7 +115,7 @@ func TestPepper(t *testing.T) {
 	if d := e.device(m); res.Mode != vaultproto.ModeApprove || d.Mode != vaultproto.ModeApprove || !d.PepperRequired {
 		t.Fatalf("a pepper device enrolled in mode %s: %+v", res.Mode, d)
 	}
-	if code, msg := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: "auto"}, nil); code != 400 || !strings.Contains(msg, "enrolled with a pepper") {
+	if code, msg := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: vaultproto.ModeAuto}, nil); code != 400 || !strings.Contains(msg, "enrolled with a pepper") {
 		t.Fatalf("mode auto: %d %s", code, msg)
 	}
 	var v server.DeviceView
@@ -122,8 +152,8 @@ func TestPepper(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantStatus(t, rel, vaultproto.StatusReleased, "")
-	if string(rel.Pepper) != pepper {
-		t.Fatalf("released pepper %q", rel.Pepper)
+	if got, err := m.OpenPepper(rel.Pepper); err != nil || got != pepper {
+		t.Fatalf("released pepper %q: %v", got, err)
 	}
 	if _, err := e.client.Send(req); err == nil {
 		t.Fatal("a re-send after the release was answered")
@@ -143,7 +173,7 @@ func TestPepper(t *testing.T) {
 	e.clock.Advance(server.ChallengeTTL)
 	rel, _ = e.client.Send(req)
 	wantStatus(t, rel, vaultproto.StatusDenied, "approval expired")
-	if len(rel.Pepper) != 0 {
+	if rel.Pepper != nil {
 		t.Fatal("a denial carries the pepper")
 	}
 
@@ -153,7 +183,7 @@ func TestPepper(t *testing.T) {
 	e.adminDo("POST", "/v1/devices/db-03/revoke", nil, nil)
 	rel, _ = e.client.Send(req)
 	wantStatus(t, rel, vaultproto.StatusDenied, "revoked")
-	if len(rel.Pepper) != 0 {
+	if rel.Pepper != nil {
 		t.Fatal("a denial carries the pepper")
 	}
 
@@ -165,7 +195,7 @@ func TestPepper(t *testing.T) {
 	}
 	e.adminDo("POST", "/v1/requests/"+req.RequestID+"/approve", map[string]any{}, nil)
 	rel, _ = e.client.Send(req)
-	if wantStatus(t, rel, vaultproto.StatusReleased, ""); len(rel.Pepper) != 0 {
+	if wantStatus(t, rel, vaultproto.StatusReleased, ""); rel.Pepper != nil {
 		t.Fatal("a plain device's release carries a pepper")
 	}
 }
@@ -179,11 +209,11 @@ func TestOperatorInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := e.addOperator("alice")
-	alice := vaulttest.NewOperator(url, e.pin, token)
+	alice := vaulttest.NewOperator(url, e.root, e.pin, token)
 
 	for _, o := range []*vaulttest.Operator{
-		vaulttest.NewOperator(url, e.pin, ""),
-		vaulttest.NewOperator(url, e.pin, "wrong"),
+		vaulttest.NewOperator(url, e.root, e.pin, ""),
+		vaulttest.NewOperator(url, e.root, e.pin, "wrong"),
 	} {
 		code, body, err := o.Do("GET", "/v1/requests", "")
 		if err != nil || code != 401 || strings.TrimSpace(string(body)) != `{"error":"unauthorized"}` {
@@ -219,8 +249,11 @@ func TestOperatorInterface(t *testing.T) {
 		t.Fatalf("approve: %d %s", code, body)
 	}
 	rel, err := e.client.Send(req)
-	if err != nil || rel.Status != vaultproto.StatusReleased || string(rel.Pepper) != "p3pp3r" {
+	if err != nil || rel.Status != vaultproto.StatusReleased {
 		t.Fatalf("release: %v %+v", err, rel)
+	}
+	if got, err := m.OpenPepper(rel.Pepper); err != nil || got != "p3pp3r" {
+		t.Fatalf("released pepper %q: %v", got, err)
 	}
 
 	// Deny.
@@ -264,14 +297,14 @@ func TestOperatorInterface(t *testing.T) {
 func TestOperatorAuthRateLimit(t *testing.T) {
 	e := newEnv(t)
 	url := e.operatorURL()
-	bob := vaulttest.NewOperator(url, e.pin, e.addOperator("bob"))
+	bob := vaulttest.NewOperator(url, e.root, e.pin, e.addOperator("bob"))
 	if code, _ := e.adminDo("POST", "/v1/operators", server.OperatorRequest{Name: "bob"}, nil); code != 409 {
 		t.Fatalf("bob twice: %d", code)
 	}
 	if code, _ := e.adminDo("POST", "/v1/operators", server.OperatorRequest{Name: "../x"}, nil); code != 400 {
 		t.Fatalf("a bad name: %d", code)
 	}
-	mallory := vaulttest.NewOperator(url, e.pin, "guess")
+	mallory := vaulttest.NewOperator(url, e.root, e.pin, "guess")
 	for i := 0; i < server.AuthFailLimit; i++ {
 		if code, _, _ := mallory.Do("GET", "/v1/requests", ""); code != 401 {
 			t.Fatalf("guess %d: %d", i, code)

@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,7 +53,7 @@ func TestTokens(t *testing.T) {
 	d := Dir{Path: t.TempDir()}
 	d.Create()
 	h := []byte{1, 2, 3}
-	if err := d.PutToken(h, &Token{Name: "a", Mode: "auto"}); err != nil {
+	if err := d.PutToken(h, &Token{Name: "a", Mode: vaultproto.ModeAuto}); err != nil {
 		t.Fatal(err)
 	}
 	if tok, err := d.Token(h); err != nil || tok.Name != "a" {

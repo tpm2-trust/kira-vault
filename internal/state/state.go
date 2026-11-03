@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mrwiora/tpm2-kira/core/attest"
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
@@ -62,22 +63,26 @@ type Config struct {
 // Device is devices/<id>.json: what the vault pinned of a machine at
 // enrolment, its release state, and its keys.
 type Device struct {
-	ID    []byte `json:"device_id"`
-	Name  string `json:"name"`
-	Label string `json:"label"`
-	Mode  string `json:"mode"` // vaultproto.ModeAuto or ModeApprove
+	ID    []byte                 `json:"device_id"`
+	Name  string                 `json:"name"`
+	Label string                 `json:"label"`
+	Mode  vaultproto.ReleaseMode `json:"mode"`
 	// PepperRequired: the machine's key is derived with an operator's
 	// pepper as well, so every release needs an approval carrying it. Such
 	// a device is always in approve mode.
 	PepperRequired bool   `json:"pepper_required"`
 	EKPublic       []byte `json:"ek_public"`
 	EKCert         []byte `json:"ek_cert,omitempty"`
+	// ReleaseKeyName is the Name of the slot's release key, checked at
+	// enrolment: a pepper is wrapped for it and the EK at every release.
+	ReleaseKeyName []byte `json:"release_key_name,omitempty"`
 
 	AKPublic            []byte               `json:"ak_public"`
 	SigningPublic       []byte               `json:"signing_public"`
 	PolicyRef           []byte               `json:"policy_ref"`
 	GenerationIndexName []byte               `json:"generation_index_name"`
 	Selection           vaultproto.Selection `json:"selection"`
+	PCRKey              []byte               `json:"pcr_key,omitempty"` // PKIX DER, for Selection.Signed
 
 	MinGeneration uint64     `json:"min_generation"` // the highest verified generation
 	Revoked       bool       `json:"revoked"`
@@ -85,6 +90,10 @@ type Device struct {
 	Failures      int        `json:"failures"` // failed verifications in a row
 	EnrolledAt    time.Time  `json:"enrolled_at"`
 	LastRelease   *time.Time `json:"last_release,omitempty"`
+	// SecureBoot is what the last verified quote and its event log established;
+	// nil before the first. Shown red unless on; the vault releases only when on.
+	SecureBoot   *attest.SecureBootFinding `json:"secure_boot,omitempty"`
+	SecureBootAt *time.Time                `json:"secure_boot_at,omitempty"`
 
 	// Remote is the machine's wrapped R (the JSON of a vaultproto.Wrapped),
 	// encrypted with AES-256-GCM under K_dev, the device ID as AAD.
@@ -104,16 +113,17 @@ func (d *Device) Pinned() *vaultproto.Device {
 		PolicyRef:           d.PolicyRef,
 		GenerationIndexName: d.GenerationIndexName,
 		Selection:           d.Selection,
+		PCRKey:              d.PCRKey,
 	}
 }
 
 // Token is tokens/<sha256 of the token>.json. The token itself is not
 // kept.
 type Token struct {
-	Name    string    `json:"name"`
-	Mode    string    `json:"mode"`
-	Expires time.Time `json:"expires"`
-	Replace []byte    `json:"replace,omitempty"` // the device this token may enrol again
+	Name    string                 `json:"name"`
+	Mode    vaultproto.ReleaseMode `json:"mode"`
+	Expires time.Time              `json:"expires"`
+	Replace []byte                 `json:"replace,omitempty"` // the device this token may enrol again
 }
 
 // ErrNotFound is a device or token that is not there.
@@ -129,9 +139,12 @@ func (d Dir) path(parts ...string) string {
 	return filepath.Join(append([]string{d.Path}, parts...)...)
 }
 
-// TLSKeyPath and TLSCertPath are the TLS key and certificate (PEM).
-func (d Dir) TLSKeyPath() string  { return d.path("tls", "key.pem") }
-func (d Dir) TLSCertPath() string { return d.path("tls", "cert.pem") }
+// TLSKeyPath and TLSCertPath are the TLS leaf's key and certificate,
+// TLSRootPath and TLSRootKeyPath the root's that signs it (PEM).
+func (d Dir) TLSKeyPath() string     { return d.path("tls", "key.pem") }
+func (d Dir) TLSCertPath() string    { return d.path("tls", "cert.pem") }
+func (d Dir) TLSRootPath() string    { return d.path("tls", "ca.pem") }
+func (d Dir) TLSRootKeyPath() string { return d.path("tls", "ca-key.pem") }
 
 // AuditPath is the audit log.
 func (d Dir) AuditPath() string { return d.path("audit.log") }

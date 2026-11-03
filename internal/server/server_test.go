@@ -3,6 +3,7 @@ package server_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,9 @@ import (
 	"time"
 
 	"github.com/mrwiora/tpm2-kira/core/vaultproto"
+
+	"github.com/mrwiora/tpm2-kira/core/attest"
+	"github.com/mrwiora/tpm2-kira/core/attest/attesttest"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
@@ -35,6 +39,8 @@ type env struct {
 	admin  http.Handler
 	ts     *httptest.Server
 	pin    string
+	root   []byte // the vault's root, PEM
+	certs  *tlsutil.Certs
 	client *vaulttest.Client
 }
 
@@ -47,11 +53,12 @@ func newEnv(t *testing.T) *env {
 	if err := tlsutil.Write(e.dir, "127.0.0.1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	cert, pin, err := tlsutil.Load(e.dir)
+	certs, err := tlsutil.Load(e.dir, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.pin = pin
+	pin := certs.Pin()
+	e.pin, e.root, e.certs = pin, certs.RootPEM(), certs
 	if e.rk, err = keys.NewRecoveryKey(); err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +72,9 @@ func newEnv(t *testing.T) *env {
 	e.srv = server.New(server.Options{Dir: e.dir, Config: e.cfg, Sealer: e.sealer, Audit: audit, Pin: pin, Now: e.clock.Now})
 	e.admin = e.srv.AdminHandler()
 	e.ts = httptest.NewUnstartedServer(e.srv.MachineHandler())
-	e.ts.TLS = tlsutil.ServerConfig(cert)
-	e.ts.Config.ErrorLog = log.New(io.Discard, "", 0) // the refused handshake of TestPin
-	e.ts.StartTLS()
+	startVaultTLS(e.ts, certs) // the refused handshake of TestPin goes nowhere
 	t.Cleanup(e.ts.Close)
-	e.client = vaulttest.NewClient(e.ts.URL, pin)
+	e.client = vaulttest.NewClient(e.ts.URL, e.root, pin)
 	return e
 }
 
@@ -104,7 +109,7 @@ func (e *env) token(req server.TokenRequest) string {
 	return t.Token
 }
 
-func (e *env) machine(mode string) *vaulttest.Machine {
+func (e *env) machine(mode vaultproto.ReleaseMode) *vaulttest.Machine {
 	e.t.Helper()
 	m, err := vaulttest.NewMachine("db-03")
 	if err != nil {
@@ -114,8 +119,12 @@ func (e *env) machine(mode string) *vaulttest.Machine {
 	if err != nil {
 		e.t.Fatalf("enrol: %v", err)
 	}
-	if want := map[string]string{"": "auto"}[mode]; want == "" && res.Mode != mode || want != "" && res.Mode != want {
-		e.t.Fatalf("enrolled in mode %q", res.Mode)
+	want := mode
+	if want == 0 {
+		want = vaultproto.ModeAuto // a token without a mode
+	}
+	if res.Mode != want {
+		e.t.Fatalf("enrolled in mode %s", res.Mode)
 	}
 	return m
 }
@@ -174,7 +183,7 @@ func (e *env) auditLines() []state.Entry {
 // release returns R wrapped as it sent it: its TPM opens it.
 func TestEnrolAndRelease(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	d := e.device(m)
 	if d.Mode != vaultproto.ModeAuto || d.MinGeneration != 5 || d.Name != "db-03" || len(d.Recovery) == 0 || len(d.Sealed.PCRs) != 1 {
 		t.Fatalf("device record %+v", d)
@@ -303,7 +312,7 @@ func TestEnrolTokens(t *testing.T) {
 	if code, msg := e.adminDo("POST", "/v1/tokens", server.TokenRequest{}, nil); code != 400 || !strings.Contains(msg, "name") {
 		t.Fatalf("nameless token: %d %s", code, msg)
 	}
-	if code, _ := e.adminDo("POST", "/v1/tokens", server.TokenRequest{Name: "x", Mode: "sometimes"}, nil); code != 400 {
+	if code, _ := e.adminDo("POST", "/v1/tokens", server.TokenRequest{Name: "x", Mode: 7}, nil); code != 400 {
 		t.Fatalf("bad mode: %d", code)
 	}
 	var tr server.TokenResponse
@@ -372,7 +381,7 @@ func TestEnrolWrongProof(t *testing.T) {
 
 func TestChallengeExpiryAndReuse(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 
 	ch, err := m.Challenge(e.client)
 	if err != nil {
@@ -421,7 +430,7 @@ func TestChallengeExpiryAndReuse(t *testing.T) {
 
 func TestGenerationRollback(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
 
 	m.Gen = 7 // a reseal of the machine
@@ -437,7 +446,7 @@ func TestGenerationRollback(t *testing.T) {
 
 func TestLockAfterFailures(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	m.TPM.Extend(11, "a kernel the signing key never saw")
 	for i := 1; i <= server.MaxFailures; i++ {
 		res := e.release(m)
@@ -475,7 +484,7 @@ func TestLockAfterFailures(t *testing.T) {
 
 func TestRevoke(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	var v server.DeviceView
 	if code, _ := e.adminDo("POST", "/v1/devices/db-03/revoke", nil, &v); code != 200 || !v.Revoked {
 		t.Fatalf("revoke: %d %+v", code, v)
@@ -495,17 +504,17 @@ func TestRevoke(t *testing.T) {
 	if code, _ := e.adminDo("GET", "/v1/devices/nothing", nil, nil); code != 404 {
 		t.Fatalf("an unknown device: %d", code)
 	}
-	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: "approve"}, &v); code != 200 || v.Mode != "approve" {
+	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: vaultproto.ModeApprove}, &v); code != 200 || v.Mode != vaultproto.ModeApprove {
 		t.Fatalf("mode: %d %+v", code, v)
 	}
-	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: "never"}, nil); code != 400 {
+	if code, _ := e.adminDo("POST", "/v1/devices/db-03/mode", server.ModeRequest{Mode: 9}, nil); code != 400 {
 		t.Fatalf("a bad mode: %d", code)
 	}
 }
 
 func TestRateLimit(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	for i := 0; i < server.RateLimit; i++ {
 		if _, err := m.Challenge(e.client); err != nil {
 			t.Fatalf("challenge %d: %v", i, err)
@@ -607,7 +616,7 @@ func TestApproveMode(t *testing.T) {
 // against the device; reseal-like resealing makes it release again.
 func TestVaultBootStateChanged(t *testing.T) {
 	e := newEnv(t)
-	m := e.machine("")
+	m := e.machine(0)
 	e.sealer.ChangeBoot()
 	for i := 0; i < server.MaxFailures+1; i++ {
 		wantStatus(t, e.release(m), vaultproto.StatusDenied, "the vault's own boot state changed: run reseal")
@@ -628,7 +637,7 @@ func TestVaultBootStateChanged(t *testing.T) {
 func TestPin(t *testing.T) {
 	e := newEnv(t)
 	m, _ := vaulttest.NewMachine("a")
-	wrong := vaulttest.NewClient(e.ts.URL, vaultproto.PinOf([]byte("another key")))
+	wrong := vaulttest.NewClient(e.ts.URL, e.root, vaultproto.PinOf([]byte("another key")))
 	_, err := m.Challenge(wrong)
 	if err == nil || !strings.Contains(err.Error(), "pin") {
 		t.Fatalf("a wrong pin: %v", err)
@@ -636,4 +645,140 @@ func TestPin(t *testing.T) {
 	if _, err := m.Challenge(e.client); err == nil || !strings.Contains(err.Error(), "unknown device") {
 		t.Fatalf("the right pin: %v", err)
 	}
+}
+
+// startVaultTLS serves ts with the vault's TLS as serve does: its leaf and
+// root through GetCertificate. (httptest's StartTLS would add its own
+// certificate, which a client without a server name - an address - gets.)
+func startVaultTLS(ts *httptest.Server, certs *tlsutil.Certs) {
+	ts.Config.ErrorLog = log.New(io.Discard, "", 0)
+	ts.Listener = tls.NewListener(ts.Listener, certs.ServerConfig())
+	ts.Start()
+	ts.URL = "https://" + ts.Listener.Addr().String()
+}
+
+// Nothing is released unless the quote establishes Secure Boot on: every other state is
+// refused, whatever the approvals say, shown in the device's view and in the audit, and
+// no failure of the device, whose quote verified.
+func TestReleaseOnlyWithSecureBootOn(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		boot       func(m *vaulttest.Machine)
+	}{
+		{"on", attest.SecureBootOn, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootOn) }},
+		{"off", attest.SecureBootOff, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootOff) }},
+		{"Setup Mode", attest.SecureBootSetupMode, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootSetupMode) }},
+		{"no event log", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) { m.TPM.PCR7Chain = nil }},
+		{"events of another boot", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) {
+			m.TPM.SetSecureBoot(attest.SecureBootOff)
+			m.TPM.PCR7Chain = attesttest.SecureBootChain(attest.AlgSHA256, attest.SecureBootOn)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			m := e.machine(0)
+			if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootNotEstablished || !v.SecureBootRed {
+				t.Fatalf("before the first quote: %+v", v.SecureBoot)
+			}
+			tc.boot(m)
+			m.Approve()
+			on := tc.want == attest.SecureBootOn
+			if on {
+				wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+			} else {
+				wantStatus(t, e.release(m), vaultproto.StatusDenied, "this vault releases only to a boot with Secure Boot on")
+			}
+			v := e.deviceView(m)
+			if v.SecureBoot.State != tc.want || v.SecureBootRed == on || v.SecureBootAt == nil {
+				t.Fatalf("the device's view: %+v, red %v", v.SecureBoot, v.SecureBootRed)
+			}
+			if d := e.device(m); d.Failures != 0 || d.Locked {
+				t.Fatalf("a verified quote counted as a failure: %+v", d)
+			}
+			lines := e.auditLines()
+			last := lines[len(lines)-1]
+			want := "denied"
+			if on {
+				want = "released"
+			}
+			if last.Result != want || last.SecureBootRed != v.SecureBootRed || last.SecureBoot != v.SecureBoot.String() {
+				t.Fatalf("the audit: %+v, the view: %+v", last, v.SecureBoot)
+			}
+		})
+	}
+}
+
+// A slot chosen without PCR 7 is held to it all the same: its quote says nothing of
+// Secure Boot, so it is not established and refused, by an operator's approval too.
+func TestSelectionWithoutPCR7IsRefused(t *testing.T) {
+	for _, mode := range []vaultproto.ReleaseMode{vaultproto.ModeAuto, vaultproto.ModeApprove} {
+		e := newEnv(t)
+		m, err := vaulttest.NewMachine("db-03")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Selection.Indices = []uint8{0, 11}
+		m.Approve()
+		if _, err := m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-03", Mode: mode})); err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, e.release(m), vaultproto.StatusDenied, "the quote does not cover PCR 7")
+		if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootNotEstablished || !v.SecureBootRed {
+			t.Fatalf("%s: %+v", mode, v.SecureBoot)
+		}
+		var list []server.RequestView
+		if code, msg := e.adminDo("GET", "/v1/requests", nil, &list); code != 200 || len(list) != 0 {
+			t.Fatalf("an operator is asked about what is refused: %d %s %+v", code, msg, list)
+		}
+	}
+}
+
+// The approvals are of PCR 7's value: a state that moved it is refused until the signing
+// key approves it. Once it does, with Secure Boot off, the approval verifies and the
+// state refuses. What was refused is still shown.
+func TestChangedPCR7IsRefusedAndShown(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(0)
+	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+	if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootOn {
+		t.Fatalf("on: %+v", v.SecureBoot)
+	}
+	m.TPM.SetSecureBoot(attest.SecureBootOff)
+	wantStatus(t, e.release(m), vaultproto.StatusDenied, "does not cover this boot state")
+	if v := e.deviceView(m); v.SecureBoot.State != attest.SecureBootOff || !v.SecureBootRed {
+		t.Fatalf("refused with Secure Boot off: %+v", v.SecureBoot)
+	}
+	lines := e.auditLines()
+	if last := lines[len(lines)-1]; last.Result != "denied" || !last.SecureBootRed || !strings.Contains(last.SecureBoot, "OFF") {
+		t.Fatalf("the audit: %+v", last)
+	}
+	m.Approve()
+	wantStatus(t, e.release(m), vaultproto.StatusDenied, "Secure Boot OFF")
+}
+
+// An operator sees the state on the request before approving. Only on reaches the queue:
+// an operator is not asked about what would be refused.
+func TestRequestShowsSecureBoot(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(vaultproto.ModeApprove)
+	wantStatus(t, e.release(m), vaultproto.StatusPending, "")
+	var list []server.RequestView
+	if code, msg := e.adminDo("GET", "/v1/requests", nil, &list); code != 200 || len(list) != 1 {
+		t.Fatalf("requests: %d %s %d", code, msg, len(list))
+	}
+	if list[0].SecureBoot.State != attest.SecureBootOn || list[0].SecureBootRed {
+		t.Fatalf("the request: %+v", list[0])
+	}
+	m.TPM.SetSecureBoot(attest.SecureBootSetupMode)
+	m.Approve()
+	wantStatus(t, e.release(m), vaultproto.StatusDenied, "SETUP MODE")
+}
+
+func (e *env) deviceView(m *vaulttest.Machine) *server.DeviceView {
+	e.t.Helper()
+	var v server.DeviceView
+	if code, msg := e.adminDo("GET", "/v1/devices/"+hex.EncodeToString(m.DeviceID), nil, &v); code != 200 {
+		e.t.Fatalf("device: %d %s", code, msg)
+	}
+	return &v
 }
