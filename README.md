@@ -14,7 +14,7 @@ and its own PCRs.
 threat model, setting up both sides, the protocol, the release rules (§6.1),
 keys at rest, the admin interface, the state directory, recovery (§6.5), the
 commands (§6.6) and the tests. The contract with tpm2-kira is its core's Go
-package `github.com/mrwiora/tpm2-kira/core/vaultproto`; this module requires
+package `github.com/tpm2-trust/tpm2-kira/core/vaultproto`; this module requires
 the core module alone, pinned by the git submodule `tpm2-kira/` (`replace`
 to `./tpm2-kira/core` in go.mod).
 
