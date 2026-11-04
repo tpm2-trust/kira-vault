@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrwiora/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
 
-	"github.com/mrwiora/tpm2-kira/core/attest"
-	"github.com/mrwiora/tpm2-kira/core/attest/attesttest"
+	"github.com/tpm2-trust/tpm2-kira/core/attest"
+	"github.com/tpm2-trust/tpm2-kira/core/attest/attesttest"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"

@@ -27,8 +27,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mrwiora/tpm2-kira/core/attest"
-	"github.com/mrwiora/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/tpm2-kira/core/attest"
+	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
 
 	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
 )
