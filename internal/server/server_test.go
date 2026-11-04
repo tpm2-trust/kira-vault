@@ -668,6 +668,15 @@ func TestReleaseOnlyWithSecureBootOn(t *testing.T) {
 		{"on", attest.SecureBootOn, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootOn) }},
 		{"off", attest.SecureBootOff, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootOff) }},
 		{"Setup Mode", attest.SecureBootSetupMode, func(m *vaulttest.Machine) { m.TPM.SetSecureBoot(attest.SecureBootSetupMode) }},
+		{"on, past systemd's OS separator", attest.SecureBootOn, func(m *vaulttest.Machine) {
+			m.TPM.SetSecureBoot(attest.SecureBootOn)
+			m.TPM.PassOSSeparator(attest.AlgSHA256)
+		}},
+		{"on, then an extend nobody logged", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) {
+			m.TPM.SetSecureBoot(attest.SecureBootOn)
+			m.TPM.PassOSSeparator(attest.AlgSHA256)
+			m.TPM.PassOSSeparator(attest.AlgSHA256)
+		}},
 		{"no event log", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) { m.TPM.PCR7Chain = nil }},
 		{"events of another boot", attest.SecureBootNotEstablished, func(m *vaulttest.Machine) {
 			m.TPM.SetSecureBoot(attest.SecureBootOff)
