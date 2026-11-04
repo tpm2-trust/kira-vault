@@ -37,6 +37,7 @@ vault#    tpm2-kira-vault token create --name db-03                        # pri
 vault#    tpm2-kira-vault tls root > vault-ca.pem                       # the machines' and operators' copy, no secret
 machine#  tpm2-kira luks enrol /dev/sda2 --password tpm --salt vault --url … --pin … --token … --ca vault-ca.pem
 vault#    tpm2-kira-vault devices | requests | audit
+vault#    tpm2-kira-vault requests                                         # also the keys to press, for a salt typed through the one-time keyboard
 vault#    tpm2-kira-vault requests answer                                  # approve, deny or skip; asks a pepper
 vault#    tpm2-kira-vault device revoke db-03                              # a machine reported stolen
 ```

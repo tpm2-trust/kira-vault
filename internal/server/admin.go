@@ -29,7 +29,8 @@ type DeviceView struct {
 	Name          string                 `json:"name"`
 	Label         string                 `json:"label"`
 	Mode          vaultproto.ReleaseMode `json:"mode"`
-	Pepper        bool                   `json:"pepper"` // releases need an approval with the operator's pepper
+	Pepper        bool                   `json:"pepper"`   // releases need an approval with the operator's pepper
+	Keyboard      bool                   `json:"keyboard"` // the salt is typed through a one-time keyboard
 	MinGeneration uint64                 `json:"min_generation"`
 	Revoked       bool                   `json:"revoked"`
 	Locked        bool                   `json:"locked"`
@@ -47,11 +48,14 @@ type DeviceView struct {
 
 // RequestView is a pending release request.
 type RequestView struct {
-	ID         string                `json:"request_id"`
-	DeviceID   string                `json:"device_id"`
-	Name       string                `json:"name"`
-	State      string                `json:"state"`
-	Pepper     bool                  `json:"pepper"` // approve it with the device's pepper
+	ID       string `json:"request_id"`
+	DeviceID string `json:"device_id"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Pepper   bool   `json:"pepper"` // approve it with the device's pepper
+	// Keys are what the person presses at the machine, while a keyboard request waits for them:
+	// for this boot alone, and worth nothing without the pad only that TPM opens.
+	Keys       string                `json:"keys,omitempty"`
 	Actor      string                `json:"actor,omitempty"`
 	Created    time.Time             `json:"created"`
 	Expires    time.Time             `json:"expires"`
@@ -128,7 +132,7 @@ func viewOf(d *state.Device) DeviceView {
 	}
 	return DeviceView{
 		SecureBoot: sb, SecureBootRed: sb.Red(), SecureBootAt: d.SecureBootAt,
-		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired,
+		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired, Keyboard: d.Keyboard,
 		MinGeneration: d.MinGeneration, Revoked: d.Revoked, Locked: d.Locked, Failures: d.Failures,
 		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection, VaultPCRs: d.Sealed.PCRs,
 	}
@@ -250,7 +254,7 @@ func (s *Server) adminMode(w http.ResponseWriter, r *http.Request) {
 	s.answer(w, v, err)
 }
 
-var stateNames = map[reqState]string{fresh: "challenged", pending: "pending", approved: "approved", denied: "denied"}
+var stateNames = map[reqState]string{keyboard: "keyboard", fresh: "challenged", pending: "pending", approved: "approved", denied: "denied"}
 
 func (s *Server) adminRequests(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
@@ -264,6 +268,9 @@ func (s *Server) adminRequests(w http.ResponseWriter, r *http.Request) {
 		v := RequestView{ID: q.id, DeviceID: hex.EncodeToString(q.device), State: stateNames[q.state], Created: q.created, Expires: q.expires, Remote: q.remote, Actor: q.actor}
 		if d, err := s.dir.Device(q.device); err == nil {
 			v.Name, v.Pepper = d.Name, d.PepperRequired
+		}
+		if q.state == keyboard {
+			v.Keys = string(q.keys)
 		}
 		if q.checked != nil {
 			v.Generation, v.PCRValues = q.checked.Generation, q.checked.PCRValues

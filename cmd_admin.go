@@ -208,7 +208,15 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 		for _, q := range list {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", q.ID, q.DeviceID, q.Name, q.State, yesNo(q.Pepper), q.Generation, q.Remote, q.Expires.Local().Format(time.TimeOnly), secureBootWord(q.SecureBoot))
 		}
-		return tw.Flush()
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		for _, q := range list {
+			if q.Keys != "" {
+				fmt.Fprintf(stdout, "Request %s of %s: press these keys at the machine: %s\n", q.ID, q.Name, q.Keys)
+			}
+		}
+		return nil
 
 	case "request":
 		if err := want(2, "request approve|deny ID"); err != nil {
