@@ -6,6 +6,7 @@ require (
 	github.com/google/go-attestation v0.6.4
 	github.com/google/go-tpm v0.9.9-0.20261030171821-c395998989d7
 	github.com/tpm2-trust/go-tui-slim v0.0.0
+	github.com/tpm2-trust/go-uefi-slim v0.0.0
 	github.com/tpm2-trust/kira/core v0.0.0
 	golang.org/x/sys v0.49.0
 )
