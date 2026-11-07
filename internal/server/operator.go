@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 // The operator interface: a subset of the admin handlers on HTTPS, for

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 )
 
 // keyboardMachine is a machine enrolled with a pepper typed through the vault's keyboard, on a

@@ -4,7 +4,7 @@
 // interface (a subset of the admin handlers over TLS, behind a bearer token
 // per operator, on a listener of its own).
 //
-// The rules are those of docs/VAULT.md §6.1 of tpm2-kira:
+// The rules are those of docs/VAULT.md §6.1 of kira:
 //
 //   - a challenge is 32 random bytes, valid ChallengeTTL, for one request;
 //     a terminal answer (released, denied) consumes it;
@@ -47,11 +47,11 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 // The rules.

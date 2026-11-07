@@ -1,10 +1,10 @@
-BINARY  := tpm2-kira-vault
+BINARY  := kira-vault
 PREFIX  ?= /usr
 UNITDIR ?= /usr/lib/systemd/system
 
 .PHONY: build test test-integration vet fmt install clean
 
-# The release builds the pinned core (the submodule tpm2-kira/), never a
+# The release builds the pinned core (the submodule kira/), never a
 # go.work around this checkout.
 build:
 	GOWORK=off CGO_ENABLED=0 go build -trimpath -o $(BINARY) .
@@ -25,7 +25,7 @@ fmt:
 
 install: build
 	install -Dm0755 $(BINARY) $(DESTDIR)$(PREFIX)/bin/$(BINARY)
-	install -Dm0644 packaging/tpm2-kira-vault.service $(DESTDIR)$(UNITDIR)/tpm2-kira-vault.service
+	install -Dm0644 packaging/kira-vault.service $(DESTDIR)$(UNITDIR)/kira-vault.service
 
 clean:
 	rm -f $(BINARY)

@@ -14,10 +14,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 // The admin interface's messages. The operator interface serves a part
@@ -425,7 +425,7 @@ func (s *Server) createToken(t *TokenRequest) (*TokenResponse, error) {
 	}
 	return &TokenResponse{
 		Token: value, Name: tok.Name, Mode: tok.Mode, Expires: tok.Expires, URL: s.cfg.URL, Pin: s.pin,
-		Command: fmt.Sprintf("tpm2-kira vault enrol --url %s --pin %s --token %s --out /run/tpm2-kira/luks.key", s.cfg.URL, s.pin, value),
+		Command: fmt.Sprintf("kira vault enrol --url %s --pin %s --token %s --out /run/kira/luks.key", s.cfg.URL, s.pin, value),
 	}, nil
 }
 

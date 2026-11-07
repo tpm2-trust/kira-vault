@@ -5,10 +5,10 @@ package main
 import (
 	"testing"
 
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 // The vault on a software TPM: a release, the vault's PCR 23 moves and the

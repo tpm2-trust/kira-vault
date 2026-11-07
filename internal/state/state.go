@@ -27,17 +27,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
 )
 
 // DefaultDir is the state directory of an installed vault.
-const DefaultDir = "/var/lib/tpm2-kira-vault"
+const DefaultDir = "/var/lib/kira-vault"
 
 // DefaultAdminSocket is where serve answers the CLI.
-const DefaultAdminSocket = "/run/tpm2-kira-vault/admin.sock"
+const DefaultAdminSocket = "/run/kira-vault/admin.sock"
 
 // DefaultTPM is the TPM the vault seals its device keys in.
 const DefaultTPM = "/dev/tpmrm0"
@@ -133,7 +133,7 @@ type Token struct {
 var ErrNotFound = errors.New("not found")
 
 // ErrLocked is a state directory another process holds.
-var ErrLocked = errors.New("the state directory is in use: is tpm2-kira-vault serve running? Stop it first")
+var ErrLocked = errors.New("the state directory is in use: is kira-vault serve running? Stop it first")
 
 // Dir is a state directory.
 type Dir struct{ Path string }
@@ -196,7 +196,7 @@ func (d Dir) Config() (*Config, error) {
 	var c Config
 	if err := readJSON(d.path("config.json"), &c); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, fmt.Errorf("%s is not a vault's state directory: run tpm2-kira-vault init", d.Path)
+			return nil, fmt.Errorf("%s is not a vault's state directory: run kira-vault init", d.Path)
 		}
 		return nil, err
 	}

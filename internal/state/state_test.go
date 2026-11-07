@@ -2,7 +2,7 @@ package state
 
 import (
 	"errors"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 	"os"
 	"path/filepath"
 	"testing"

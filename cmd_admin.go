@@ -19,11 +19,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 // adminClient talks to serve over its admin socket.
@@ -59,7 +59,7 @@ func (c *adminClient) send(method, path string, in any) (*http.Response, error) 
 	}
 	rsp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("the vault's admin socket %s does not answer (is tpm2-kira-vault serve running?): %w", c.socket, err)
+		return nil, fmt.Errorf("the vault's admin socket %s does not answer (is kira-vault serve running?): %w", c.socket, err)
 	}
 	if rsp.StatusCode/100 != 2 {
 		defer rsp.Body.Close()
@@ -113,7 +113,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 	c := newAdminClient(*socket)
 	want := func(n int, form string) error {
 		if len(pos) != n {
-			return fmt.Errorf("usage: tpm2-kira-vault %s", form)
+			return fmt.Errorf("usage: kira-vault %s", form)
 		}
 		return nil
 	}
@@ -157,7 +157,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 
 	case "device":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: tpm2-kira-vault device show|revoke|unrevoke|unlock DEVICE, or device mode DEVICE auto|approve")
+			return fmt.Errorf("usage: kira-vault device show|revoke|unrevoke|unlock DEVICE, or device mode DEVICE auto|approve")
 		}
 		var d server.DeviceView
 		switch pos[0] {
@@ -259,9 +259,9 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 				return err
 			}
 			fmt.Fprintf(stdout, "Operator %s, token (shown this once):\n\n  %s\n\n", o.Name, o.Token)
-			fmt.Fprintf(stdout, "  pin:       %s (the vault's root)\n  for curl:  tpm2-kira-vault tls root > vault-ca.pem, then --cacert vault-ca.pem\n", o.Pin)
+			fmt.Fprintf(stdout, "  pin:       %s (the vault's root)\n  for curl:  kira-vault tls root > vault-ca.pem, then --cacert vault-ca.pem\n", o.Pin)
 			if o.URL == "" {
-				fmt.Fprintln(stdout, "\nThe operator interface is off: tpm2-kira-vault config set operator-listen :8444, with serve stopped.")
+				fmt.Fprintln(stdout, "\nThe operator interface is off: kira-vault config set operator-listen :8444, with serve stopped.")
 			} else {
 				fmt.Fprintf(stdout, "  URL:       %s\n\nFor example:\n\n  %s\n", o.URL, o.Example)
 			}

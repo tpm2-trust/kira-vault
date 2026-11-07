@@ -23,10 +23,10 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/tlsutil"
 )
 
 // ── init ─────────────────────────────────────────────────────────────────
@@ -128,9 +128,9 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "Initialised the vault in %s.\n\n", *dir)
-	fmt.Fprintf(stdout, "  URL:   %s\n  pin:   %s  (its root's key)\n  root:  tpm2-kira-vault tls root   (for the machines' %s, and curl --cacert)\n  PCRs:  %s (SHA-256)\n  TPM:   %s\n", cfg.URL, pin, "/etc/tpm2-kira/vault-ca.pem", formatPCRs(pcrs), cfg.TPM)
+	fmt.Fprintf(stdout, "  URL:   %s\n  pin:   %s  (its root's key)\n  root:  kira-vault tls root   (for the machines' %s, and curl --cacert)\n  PCRs:  %s (SHA-256)\n  TPM:   %s\n", cfg.URL, pin, "/etc/kira/vault-ca.pem", formatPCRs(pcrs), cfg.TPM)
 	if u := server.OperatorURL(cfg); u != "" {
-		fmt.Fprintf(stdout, "  operator interface: %s (tokens: tpm2-kira-vault operator add NAME)\n", u)
+		fmt.Fprintf(stdout, "  operator interface: %s (tokens: kira-vault operator add NAME)\n", u)
 	}
 	fmt.Fprintln(stdout)
 	if len(pcrs) == 0 {
@@ -138,10 +138,10 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Vault recovery key (shown this once: write it down and keep it offline):\n\n    %s\n\n", rk.String())
 	fmt.Fprintln(stdout, "It reseals the device keys after a firmware or Secure Boot change of this vault")
-	fmt.Fprintln(stdout, "(tpm2-kira-vault reseal). Without it and without the vault's boot state, no device")
+	fmt.Fprintln(stdout, "(kira-vault reseal). Without it and without the vault's boot state, no device")
 	fmt.Fprintln(stdout, "is released any more, and every machine needs its recovery passphrase.")
 	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "Next: systemctl enable --now tpm2-kira-vault, then tpm2-kira-vault token create --name NAME.")
+	fmt.Fprintln(stdout, "Next: systemctl enable --now kira-vault, then kira-vault token create --name NAME.")
 	return nil
 }
 
@@ -306,7 +306,7 @@ func checkOperatorListen(addr, listen string) error {
 // cmdConfig changes config.json. It refuses while serve runs, which reads
 // the configuration at its start.
 // cmdTLS is 'tls root': the vault's root certificate, for the machines'
-// /etc/tpm2-kira/vault-ca.pem (luks enrol --ca FILE) and operators' curl
+// /etc/kira/vault-ca.pem (luks enrol --ca FILE) and operators' curl
 // --cacert. It only reads, also while serve runs.
 func cmdTLS(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("tls", flag.ContinueOnError)
@@ -317,7 +317,7 @@ func cmdTLS(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) != 1 || pos[0] != "root" {
-		return errors.New("usage: tpm2-kira-vault tls root [--dir DIR]")
+		return errors.New("usage: kira-vault tls root [--dir DIR]")
 	}
 	b, err := tlsutil.RootPEMOf(state.Dir{Path: *dir})
 	if err != nil {
@@ -336,7 +336,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) != 3 || pos[0] != "set" || pos[1] != "operator-listen" {
-		return errors.New(`usage: tpm2-kira-vault config set operator-listen ADDR|""`)
+		return errors.New(`usage: kira-vault config set operator-listen ADDR|""`)
 	}
 	d := state.Dir{Path: *dir}
 	unlock, err := d.Lock()

@@ -12,13 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 // vault is a state directory made by init, and serve running on it.
@@ -160,7 +160,7 @@ func (v *vault) enrolWith(name string, pepper bool) *vaulttest.Machine {
 		v.t.Fatalf("token create: %v\n%s", err, out)
 	}
 	tok := tokenRE.FindStringSubmatch(out)
-	if tok == nil || !strings.Contains(out, "tpm2-kira vault enrol --url "+v.url+" --pin "+v.pin+" --token "+tok[1]) {
+	if tok == nil || !strings.Contains(out, "kira vault enrol --url "+v.url+" --pin "+v.pin+" --token "+tok[1]) {
 		v.t.Fatalf("token create output:\n%s", out)
 	}
 	m, err := vaulttest.NewMachine(name)

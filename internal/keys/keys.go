@@ -123,7 +123,7 @@ func (k *RecoveryKey) Public() ([]byte, error) {
 // Wipe overwrites the key.
 func (k *RecoveryKey) Wipe() { clear(k[:]) }
 
-const recoveryInfo = "tpm2-kira-vault/recovery"
+const recoveryInfo = "kira-vault/recovery"
 
 // EncryptToRecovery encrypts secret to the recovery key's public key:
 // ephemeral X25519 public key (32 bytes) ‖ AES-256-GCM under

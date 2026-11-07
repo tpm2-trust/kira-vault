@@ -16,16 +16,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/attest/attesttest"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/attest/attesttest"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/tlsutil"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 type env struct {
@@ -317,7 +317,7 @@ func TestEnrolTokens(t *testing.T) {
 	}
 	var tr server.TokenResponse
 	e.adminDo("POST", "/v1/tokens", server.TokenRequest{Name: "x"}, &tr)
-	if tr.Pin != e.pin || tr.URL != e.cfg.URL || !strings.Contains(tr.Command, "tpm2-kira vault enrol --url "+e.cfg.URL+" --pin "+e.pin+" --token "+tr.Token) {
+	if tr.Pin != e.pin || tr.URL != e.cfg.URL || !strings.Contains(tr.Command, "kira vault enrol --url "+e.cfg.URL+" --pin "+e.pin+" --token "+tr.Token) {
 		t.Fatalf("token response %+v", tr)
 	}
 	ents, _ := os.ReadDir(e.dir.Path + "/tokens")
