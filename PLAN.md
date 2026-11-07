@@ -329,7 +329,13 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   `PolicyDigest`; PolicyOR for a second key), `ApprovalSign`/`approvals/` files,
   `backup check`'s public-area rebuild. `keys.RecoveryKey` and the sealer go.
   Tests against swtpm (`-tags integration`), known answers for the digests.
-- [ ] **B4** The approval's evidence (`internal/bootstate`): PCR 7 through
+- [x] **B4** (the firmware's log read with go-attestation v0.6.4, as kira reads it - one
+  parser for both, fuzzed, with its firmware workarounds; the owner, 2026-11-07. The rules:
+  PCR 7 refuses unless on; PCR 15 refuses without a dm-crypt volume under the state
+  directory, a log that does not replay, or - where systemd-cryptsetup measures volumes -
+  the volume's event missing; where nothing measures volumes it is a note, and serve's
+  start check stands. The volume through `/sys` and, where a file's device is none (btrfs),
+  the mount's source) The approval's evidence (`internal/bootstate`): PCR 7 through
   `attest.EstablishSecureBoot` over the firmware's event log; PCR 15 by replaying
   systemd's measurement log, the state directory's volume found through `/sys`
   and its `cryptsetup:` event; the dm-crypt start check where nothing is
