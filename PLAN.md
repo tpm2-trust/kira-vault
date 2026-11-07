@@ -170,9 +170,10 @@ recovery key, and `reseal`.
 
     authPolicy = PolicyAuthorize(approval key, policyRef) ; PolicyCommandCode(TPM2_HMAC)
 
-- The approved part is `PolicyPCR(selection, values)`. The approval key signs
-  its digest (`aHash = H(approvedPolicy ‖ policyRef)`), and the session runs
-  PolicyPCR → PolicyAuthorize(ticket) → PolicyCommandCode.
+- The approved part is `PolicyPCR(selection, values) ; PolicyNV(counter == N)`
+  (the counter: open questions, decided 2). The approval key signs its digest
+  (`aHash = H(approvedPolicy ‖ policyRef)`), and the session runs PolicyPCR →
+  PolicyNV → PolicyAuthorize(ticket) → PolicyCommandCode.
 - With a YubiKey as the second approval key, the master's authPolicy is
   `PolicyOR(branch TPM key, branch YubiKey)`. Each branch is that same AND
   with its own key.
@@ -406,18 +407,17 @@ the end of the batch.
 
 ## Open questions
 
-1. **The fixed part of the master's policy.** The decision reads
-   "PolicyAuthorize(approval key, policyRef) ; PolicyPCR(selection)". A
-   PolicyPCR after PolicyAuthorize is fixed at import with fixed values, so every
-   change of the selection's values would need a new import, which needs the
-   backup. The plan therefore puts the PCR values in the **approved** part
-   (signed per approval) and fixes `PolicyCommandCode(TPM2_HMAC)` after
-   PolicyAuthorize. Is that the intent, or should a fixed PolicyPCR stay as well
-   (for example PCR 15 at a value fixed at init)?
-2. **Rolling back to an old approval.** Every approval stays valid: a vault
-   booted into an older, approved state (old firmware, an old dbx) derives
-   again. tpm2-kira revokes old approvals with a generation NV index in the
-   approved policy (PolicyNV). The same for the vault: an NV counter it defines
-   (by its own code: the vault does not depend on aSSH's `persist`), `approve
-   --retire-older` incrementing it? Recommended: yes, with `approve` asking for
-   it every time.
+None open on the keys. Decided by the owner (2026-11-07):
+
+1. **The fixed part is `PolicyCommandCode(TPM2_HMAC)` alone.** The PCR values come only
+   through approvals (signed per approval); no PCR value is fixed at import - that would
+   make every change of it a new import from the backup.
+2. **Rollback is closed by a counter.** Every approval names the value of an NV counter
+   of the vault's (`PolicyNV(counter == N)` in the approved part); a new approval first
+   raises the counter, so every older approval fails in the TPM, whatever the PCRs. Going
+   back to an older state on purpose is a new approval. The counter: an NV index of type
+   counter at the vault's own handle 0x01804000 - outside tpm2-kira's range
+   (0x01803000-0x01803FFF, which its sweep takes) and aSSH's (0x018029xx) - defined by
+   the vault's own code, noDA, incremented only with the approval key (its write policy),
+   so nobody else can lock the vault out by raising it. The panel shows its value with
+   each approval.
