@@ -356,7 +356,7 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   `approvals/`, the device record without `Sealed`/`Recovery`. Server tests;
   `TestVaultOnSWTPM` across an approval (PCR extended in swtpm, release refused,
   approved, released).
-- [ ] **B6** Admin endpoints (admin socket only): `GET /v1/status` (version,
+- [x] **B6** (the TPM's maker and dictionary-attack state through GetCapability; the certificates read at each request, the leaf being renewed while serve runs) Admin endpoints (admin socket only): `GET /v1/status` (version,
   URL, listen, operator listen, pin, selection, approval due and the values that
   differ, the approval keys, TPM path, manufacturer, DA state, leaf/root NotAfter,
   counts, started at); `GET /v1/tokens` (name, mode, expires, replace, ID = first

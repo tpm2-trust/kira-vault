@@ -223,12 +223,30 @@ func TestCommands(t *testing.T) {
 	m := v.enrol("db-03")
 	wantReleased(t, m, v.release(m))
 
+	// status: the vault as it runs.
+	out, err := cli(t, "", "status", "--socket", v.sock)
+	if err != nil || !strings.Contains(out, "approval:      in use") || !strings.Contains(out, "FAKE") || !strings.Contains(out, "devices:       1\n") {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	// token list and withdraw.
+	out, _ = cli(t, "", "token", "create", "--name", "spare", "--socket", v.sock)
+	if out, err = cli(t, "", "token", "list", "--socket", v.sock); err != nil || !strings.Contains(out, "spare") {
+		t.Fatalf("token list: %v\n%s", err, out)
+	}
+	id := regexp.MustCompile(`(?m)^([0-9a-f]{16})\s+spare`).FindStringSubmatch(out)
+	if id == nil {
+		t.Fatalf("token list:\n%s", out)
+	}
+	if out, err = cli(t, "", "token", "withdraw", id[1], "--socket", v.sock); err != nil || !strings.Contains(out, "withdrawn") {
+		t.Fatalf("token withdraw: %v\n%s", err, out)
+	}
+
 	// approve works beside a running serve: nothing to approve now.
 	if out, err := cli(t, "", "approve", "--dir", v.dir); err != nil || !strings.Contains(out, "approved already") {
 		t.Fatalf("approve while serving: %v\n%s", err, out)
 	}
 
-	out, err := cli(t, "", "devices", "--dir", v.dir)
+	out, err = cli(t, "", "devices", "--dir", v.dir)
 	if err != nil || !strings.Contains(out, "db-03") || !strings.Contains(out, "active") {
 		t.Fatalf("devices: %v\n%s", err, out)
 	}
@@ -287,6 +305,9 @@ func TestCommands(t *testing.T) {
 	}
 	if out, err := cli(t, "", "approvals", "--dir", v.dir); err != nil || !strings.Contains(out, "No approval covers") {
 		t.Fatalf("approvals while due: %v\n%s", err, out)
+	}
+	if out, err := cli(t, "", "status", "--socket", v.sock); err != nil || !strings.Contains(out, "WARNING: DUE: PCR 15 moved") {
+		t.Fatalf("status while due: %v\n%s", err, out)
 	}
 	if _, err := cli(t, "999999\n", "approve", "--dir", v.dir); !errors.Is(err, keys.ErrWrongPIN) {
 		t.Fatalf("approve with a wrong PIN: %v", err)

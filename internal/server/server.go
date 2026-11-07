@@ -84,6 +84,7 @@ type Options struct {
 	Keys   DeviceKeys
 	Audit  *state.Audit
 	Pin    string           // the pin of the TLS key, for token create
+	Info   Info             // for GET /v1/status
 	Now    func() time.Time // the clock; time.Now when nil
 	Log    *log.Logger      // operational messages; never secrets
 }
@@ -91,13 +92,14 @@ type Options struct {
 // Server holds the vault's in-memory state: enrolments in progress,
 // challenges and pending requests, the rate windows.
 type Server struct {
-	dir    state.Dir
-	cfg    *state.Config
-	keys   DeviceKeys
-	audit  *state.Audit
-	pin    string
-	now    func() time.Time
-	log    *log.Logger
+	dir   state.Dir
+	cfg   *state.Config
+	keys  DeviceKeys
+	audit *state.Audit
+	pin   string
+	info  Info
+	now   func() time.Time
+	log   *log.Logger
 
 	mu       sync.Mutex
 	enrols   map[string]*enrolment
@@ -172,7 +174,7 @@ func New(o Options) *Server {
 		lg = log.New(io.Discard, "", 0)
 	}
 	return &Server{
-		dir: o.Dir, cfg: o.Config, keys: o.Keys, audit: o.Audit, pin: o.Pin, now: now, log: lg,
+		dir: o.Dir, cfg: o.Config, keys: o.Keys, audit: o.Audit, pin: o.Pin, info: o.Info, now: now, log: lg,
 		enrols:   map[string]*enrolment{},
 		requests: map[string]*request{},
 		layouts:  map[string]*shown{},

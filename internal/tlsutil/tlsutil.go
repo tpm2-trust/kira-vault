@@ -213,6 +213,9 @@ func (c *Certs) RootPEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.root.Raw})
 }
 
+// Root is the root's certificate.
+func (c *Certs) Root() *x509.Certificate { return c.root }
+
 // Leaf is the leaf served now.
 func (c *Certs) Leaf() *x509.Certificate {
 	c.mu.Lock()

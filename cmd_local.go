@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -337,7 +338,8 @@ func serve(ctx context.Context, d state.Dir, stderr io.Writer, ready chan<- stru
 	} else if _, err := approval.Current(live, approvals); err != nil {
 		logger.Printf("%v: nothing is released until then", err)
 	}
-	srv := server.New(server.Options{Dir: d, Config: cfg, Keys: &approval.Keys{TPM: t, Dir: d, PCRs: cfg.PCRs}, Audit: audit, Pin: pin, Log: logger})
+	info := server.Info{Version: version(), StartedAt: time.Now().UTC(), Certs: certs, Keys: keysStatus(t, d, cfg.PCRs)}
+	srv := server.New(server.Options{Dir: d, Config: cfg, Keys: &approval.Keys{TPM: t, Dir: d, PCRs: cfg.PCRs}, Audit: audit, Pin: pin, Info: info, Log: logger})
 
 	base := func(net.Listener) context.Context { return ctx }
 
@@ -504,4 +506,74 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "The operator interface listens on %s (%s) from serve's next start.\n", pos[2], server.OperatorURL(cfg))
 	}
 	return nil
+}
+
+// keysStatus is the vault's keys as GET /v1/status shows them, read at each request.
+func keysStatus(t approval.TPM, d state.Dir, pcrs []uint8) func() *server.KeysStatus {
+	return func() *server.KeysStatus {
+		ks := &server.KeysStatus{}
+		fail := func(err error) *server.KeysStatus { ks.Error = err.Error(); return ks }
+		m, err := d.Master()
+		if err != nil {
+			return fail(err)
+		}
+		for _, k := range m.ApprovalKeys {
+			ks.ApprovalKeys = append(ks.ApprovalKeys, k.Kind)
+		}
+		if i, ok := t.(interface{ Info() (*keys.Info, error) }); ok {
+			if info, err := i.Info(); err == nil {
+				ks.TPM = info
+			} else {
+				return fail(err)
+			}
+		}
+		live, err := approval.ReadLive(t, pcrs)
+		if err != nil {
+			return fail(err)
+		}
+		ks.Counter = live.Counter
+		approvals, err := d.Approvals()
+		if err != nil {
+			return fail(err)
+		}
+		if a, err := approval.Current(live, approvals); err == nil {
+			ks.Approved = &a.Time
+		} else {
+			ks.ApprovalDue = true
+			if len(approvals) > 0 {
+				ks.Moved = live.Moved(approvals[0])
+			}
+		}
+		return ks
+	}
+}
+
+// version is the build's: its module version, or its VCS revision.
+func version() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	rev, dirty := "", false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if rev == "" {
+		return "devel"
+	}
+	if dirty {
+		rev += "+dirty"
+	}
+	return rev
 }

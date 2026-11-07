@@ -246,3 +246,8 @@ func (t *TPM) Masters() []string {
 	}
 	return out
 }
+
+// Info is the TPM's maker and dictionary-attack state, as keys.TPM reads them.
+func (t *TPM) Info() (*keys.Info, error) {
+	return &keys.Info{Manufacturer: "FAKE", MaxAuthFail: 32, LockoutInterval: 600}, nil
+}

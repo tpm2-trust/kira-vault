@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -177,4 +178,64 @@ func Layout(w io.Writer, keyOrder, layout string) {
 		}
 		fmt.Fprintf(w, "  key   %s%s\n  types %s%s\n", indent, keys.String(), indent, types.String())
 	}
+}
+
+// Status is a running vault's state, one line a part; what needs a person is marked.
+func Status(w io.Writer, st *server.StatusView) {
+	fmt.Fprintf(w, "kira-vault %s, serving since %s\n\n", st.Version, st.StartedAt.Local().Format(time.DateTime))
+	fmt.Fprintf(w, "  URL:           %s (machines on %s)\n", st.URL, st.Listen)
+	if st.OperatorURL != "" {
+		fmt.Fprintf(w, "  operators on:  %s (%s)\n", st.OperatorListen, st.OperatorURL)
+	} else {
+		fmt.Fprintln(w, "  operators on:  off")
+	}
+	fmt.Fprintf(w, "  pin:           %s\n", st.Pin)
+	fmt.Fprintf(w, "  PCRs:          %s (SHA-256)\n", PCRs(st.PCRs))
+	if k := st.Keys; k != nil {
+		switch {
+		case k.Error != "":
+			fmt.Fprintf(w, "  approval:      %s\n", Red(w, true, "WARNING: the keys could not be read: "+k.Error))
+		case k.ApprovalDue:
+			moved := ""
+			if len(k.Moved) > 0 {
+				moved = ": PCR " + PCRs(k.Moved) + " moved"
+			}
+			fmt.Fprintf(w, "  approval:      %s\n", Red(w, true, "WARNING: DUE"+moved+" - nothing is released until kira-vault approve"))
+		default:
+			fmt.Fprintf(w, "  approval:      in use, of %s (counter %d)\n", k.Approved.Local().Format(time.DateTime), k.Counter)
+		}
+		fmt.Fprintf(w, "  approval keys: %s\n", strings.Join(k.ApprovalKeys, ", "))
+		tpm := st.TPMPath
+		if k.TPM != nil {
+			tpm += ", " + k.TPM.Manufacturer
+			da := fmt.Sprintf("; wrong PINs counted %d of %d", k.TPM.LockoutCounter, k.TPM.MaxAuthFail)
+			if k.TPM.InLockout {
+				da = "; " + Red(w, true, "WARNING: IN DICTIONARY-ATTACK LOCKOUT")
+			}
+			tpm += da
+		}
+		fmt.Fprintf(w, "  TPM:           %s\n", tpm)
+	}
+	if !st.LeafNotAfter.IsZero() {
+		fmt.Fprintf(w, "  certificates:  leaf until %s, root until %s\n", st.LeafNotAfter.Local().Format(time.DateOnly), st.RootNotAfter.Local().Format(time.DateOnly))
+	}
+	devices := fmt.Sprintf("%d", st.Devices)
+	var notes []string
+	for n, what := range map[int]string{st.Revoked: "revoked", st.Locked: "locked", st.NotSecureBoot: "whose last boot was not Secure Boot on"} {
+		if n > 0 {
+			notes = append(notes, fmt.Sprintf("%d %s", n, what))
+		}
+	}
+	if len(notes) > 0 {
+		sort.Strings(notes)
+		devices += " (" + strings.Join(notes, ", ") + ")"
+	}
+	fmt.Fprintf(w, "  devices:       %s\n", devices)
+	tokens := fmt.Sprintf("%d unused", st.Tokens)
+	if st.ExpiredTokens > 0 {
+		tokens += fmt.Sprintf(", %d of them expired (token withdraw)", st.ExpiredTokens)
+	}
+	fmt.Fprintf(w, "  tokens:        %s\n", tokens)
+	fmt.Fprintf(w, "  operators:     %d\n", st.Operators)
+	fmt.Fprintf(w, "  requests:      %d waiting for an operator\n", st.PendingRequests)
 }

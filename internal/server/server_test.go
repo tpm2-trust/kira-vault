@@ -806,3 +806,56 @@ func (e *env) deviceView(m *vaulttest.Machine) *server.DeviceView {
 	}
 	return &v
 }
+
+// GET /v1/status counts what the vault holds; GET /v1/tokens lists the unused tokens
+// by an ID, never their value; DELETE withdraws one, audited, and it enrols nothing.
+func TestStatusAndTokens(t *testing.T) {
+	e := newEnv(t)
+	e.machine(0)
+	e.adminDo("POST", "/v1/devices/db-03/revoke", nil, nil)
+	tok := e.token(server.TokenRequest{Name: "web-1"})
+	e.token(server.TokenRequest{Name: "old", TTLSeconds: 1})
+	e.clock.Advance(2 * time.Second)
+
+	var st server.StatusView
+	if code, msg := e.adminDo("GET", "/v1/status", nil, &st); code != 200 {
+		t.Fatalf("status: %d %s", code, msg)
+	}
+	if st.Devices != 1 || st.Revoked != 1 || st.Tokens != 2 || st.ExpiredTokens != 1 || st.URL != e.cfg.URL || st.Pin != e.pin {
+		t.Fatalf("status %+v", st)
+	}
+	var list []server.TokenView
+	if code, _ := e.adminDo("GET", "/v1/tokens", nil, &list); code != 200 || len(list) != 2 || len(list[0].ID) != 16 {
+		t.Fatalf("tokens %+v", list)
+	}
+	raw, _ := json.Marshal(list)
+	if strings.Contains(string(raw), tok) {
+		t.Fatal("a token's value is listed")
+	}
+	var web server.TokenView
+	for _, l := range list {
+		if l.Name == "web-1" {
+			web = l
+		}
+	}
+	if code, _ := e.adminDo("DELETE", "/v1/tokens/"+web.ID, nil, nil); code != 200 {
+		t.Fatalf("withdraw: %d", code)
+	}
+	if code, _ := e.adminDo("DELETE", "/v1/tokens/"+web.ID, nil, nil); code != 404 {
+		t.Fatalf("withdraw twice: %d", code)
+	}
+	if code, _ := e.adminDo("DELETE", "/v1/tokens/abc", nil, nil); code != 404 {
+		t.Fatalf("withdraw by a short ID: %d", code)
+	}
+	other, _ := vaulttest.NewMachine("web-1")
+	if _, err := other.Enrol(e.client, tok); err == nil {
+		t.Fatal("a withdrawn token enrolled")
+	}
+	found := false
+	for _, l := range e.auditLines() {
+		found = found || l.Event == "token-withdraw" && l.Name == "web-1"
+	}
+	if !found {
+		t.Fatal("the withdrawal is not in the audit log")
+	}
+}

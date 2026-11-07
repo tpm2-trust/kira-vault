@@ -62,8 +62,47 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 	esc := url.PathEscape
 
 	switch cmd {
+	case "status":
+		if err := want(0, "status"); err != nil {
+			return err
+		}
+		var st server.StatusView
+		if err := c.Do("GET", "/v1/status", nil, &st); err != nil {
+			return err
+		}
+		view.Status(stdout, &st)
+		return nil
+
 	case "token":
-		if err := want(1, "token create --name NAME [--mode auto|approve] [--ttl 1h] [--replace DEVICE]"); err != nil {
+		if len(pos) == 1 && pos[0] == "list" {
+			var list []server.TokenView
+			if err := c.Do("GET", "/v1/tokens", nil, &list); err != nil {
+				return err
+			}
+			tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "TOKEN\tNAME\tMODE\tEXPIRES\tREPLACES")
+			for _, t := range list {
+				exp := t.Expires.Local().Format(time.DateTime)
+				if t.Expired {
+					exp += " (expired)"
+				}
+				rep := t.Replace
+				if rep == "" {
+					rep = "-"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", t.ID, t.Name, t.Mode, exp, rep)
+			}
+			return tw.Flush()
+		}
+		if len(pos) == 2 && pos[0] == "withdraw" {
+			var t server.TokenView
+			if err := c.Do("DELETE", "/v1/tokens/"+esc(pos[1]), nil, &t); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "Token %s for %s withdrawn: it enrols nothing any more.\n", t.ID, t.Name)
+			return nil
+		}
+		if err := want(1, "token create --name NAME [--mode auto|approve] [--ttl 1h] [--replace DEVICE], token list, token withdraw ID"); err != nil {
 			return err
 		}
 		if pos[0] != "create" {

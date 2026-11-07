@@ -35,7 +35,10 @@ Usage:
   kira-vault config set operator-listen ADDR|""   [--dir DIR]
   kira-vault serve  [--dir DIR]
   kira-vault tls root [--dir DIR]
+  kira-vault status
   kira-vault token create --name NAME [--mode auto|approve] [--ttl 1h] [--replace DEVICE]
+  kira-vault token list
+  kira-vault token withdraw ID
   kira-vault devices
   kira-vault device show|revoke|unlock DEVICE
   kira-vault device mode DEVICE auto|approve
@@ -151,7 +154,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return cmdConfig(rest, stdout, stderr)
 	case "tls":
 		return cmdTLS(rest, stdout, stderr)
-	case "token", "devices", "device", "requests", "request", "audit", "operators", "operator":
+	case "status", "token", "devices", "device", "requests", "request", "audit", "operators", "operator":
 		return cmdAdmin(cmd, rest, stdin, stdout, stderr)
 	}
 	return fmt.Errorf("unknown command %q (kira-vault help)", cmd)

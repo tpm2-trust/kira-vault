@@ -355,6 +355,37 @@ func (d Dir) Token(hash []byte) (*Token, error) {
 	return &t, nil
 }
 
+// StoredToken is a token as tokens/ holds it: under the SHA-256 of its value.
+type StoredToken struct {
+	Hash []byte
+	*Token
+}
+
+// Tokens reads every unused token, ordered by name.
+func (d Dir) Tokens() ([]StoredToken, error) {
+	ents, err := os.ReadDir(d.path("tokens"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var out []StoredToken
+	for _, e := range ents {
+		name, ok := strings.CutSuffix(e.Name(), ".json")
+		h, err := hex.DecodeString(name)
+		if !ok || err != nil || len(h) != 32 {
+			continue
+		}
+		t, err := d.Token(h)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, StoredToken{Hash: h, Token: t})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 // ConsumeToken removes a token. Of several callers only one succeeds; the
 // others get ErrNotFound.
 func (d Dir) ConsumeToken(hash []byte) error {
