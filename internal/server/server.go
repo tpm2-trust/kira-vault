@@ -91,6 +91,7 @@ type Server struct {
 	mu       sync.Mutex
 	enrols   map[string]*enrolment
 	requests map[string]*request
+	layouts  map[string]*shown // by request ID
 	rate     map[string][]time.Time
 
 	authFails map[string][]time.Time // failed operator authentications per remote address
@@ -111,12 +112,7 @@ const (
 	pending                  // verified, waiting for an operator
 	approved                 // an operator approved it
 	denied                   // an operator denied it
-	keyboard                 // the keys are shown; the machine is to prove them (a salt typed through a keyboard)
 )
-
-// MaxKeyTries bounds the wrong keys per request: the keys are one-time, and a machine that keeps
-// getting them wrong starts over with a new challenge.
-const MaxKeyTries = 3
 
 type request struct {
 	id      string
@@ -131,24 +127,26 @@ type request struct {
 
 	actor  string // who approved or denied it
 	pepper []byte // the approval's pepper, until the release passes it on
-
-	// A salt typed through a keyboard: the keys to show, K, the answer to send again, the wrong
-	// tries, and whether the keys were proved.
-	keys   []byte
-	key    []byte
-	answer *vaultproto.ReleaseResponse
-	tries  int
-	typed  bool
 }
+
+// shown is a keyboard device's layout of one release, for an operator to read for a while: in
+// memory alone, never in the audit.
+type shown struct {
+	request string
+	device  []byte
+	created time.Time
+	expires time.Time
+	layout  *attest.KeyboardLayout
+	remote  string
+}
+
+// LayoutTTL is how long a released layout is shown: as long as a person takes to type.
+const LayoutTTL = 15 * time.Minute
 
 // forget drops a request and wipes its pepper.
 func (s *Server) forget(q *request) {
 	clear(q.pepper)
 	q.pepper = nil
-	clear(q.keys)
-	q.keys = nil
-	clear(q.key)
-	q.key = nil
 	delete(s.requests, q.id)
 }
 
@@ -166,20 +164,20 @@ func New(o Options) *Server {
 		dir: o.Dir, cfg: o.Config, sealer: o.Sealer, audit: o.Audit, pin: o.Pin, now: now, log: lg,
 		enrols:   map[string]*enrolment{},
 		requests: map[string]*request{},
+		layouts:  map[string]*shown{},
 		rate:     map[string][]time.Time{},
 
 		authFails: map[string][]time.Time{},
 	}
 }
 
-// MachineHandler serves the paths of vaultproto.
+// MachineHandler serves the four paths of vaultproto.
 func (s *Server) MachineHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+vaultproto.PathEnrol, s.handleEnrol)
 	mux.HandleFunc("POST "+vaultproto.PathEnrolConfirm, s.handleEnrolConfirm)
 	mux.HandleFunc("POST "+vaultproto.PathChallenge, s.handleChallenge)
 	mux.HandleFunc("POST "+vaultproto.PathRelease, s.handleRelease)
-	mux.HandleFunc("POST "+vaultproto.PathKeyboard, s.handleKeyboard)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such path")
 	})
@@ -412,12 +410,9 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		return nil, err
 	}
 	defer keys.Wipe(kdev)
-	// With a salt typed through a keyboard there is no R: what is kept is the salt, the same way.
-	remoteJSON := req.KeyboardSalt
-	if req.KeyboardSalt == nil {
-		if remoteJSON, err = json.Marshal(req.Remote); err != nil {
-			return nil, err
-		}
+	remoteJSON, err := json.Marshal(req.Remote)
+	if err != nil {
+		return nil, err
 	}
 	encRemote, err := keys.Encrypt(kdev, remoteJSON, req.DeviceID)
 	if err != nil {
@@ -446,7 +441,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		Label:               req.Label,
 		Mode:                mode,
 		PepperRequired:      req.Pepper,
-		Keyboard:            req.KeyboardSalt != nil,
+		Keyboard:            req.Keyboard,
 		EKPublic:            req.EKPublic,
 		EKCert:              req.EKCert,
 		ReleaseKeyName:      rkName,
@@ -486,7 +481,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		detail += ", with a pepper"
 	}
 	if rec.Keyboard {
-		detail += ", a salt typed through a one-time keyboard"
+		detail += ", a pepper typed through a one-time keyboard"
 	}
 	if err := s.logAudit(state.Entry{Event: "enrol-confirm", Device: dev, Name: req.Name, Request: c.EnrolID, Remote: remote, Result: "enrolled", Detail: fmt.Sprintf("%s, mode %s, generation %d", detail, rec.Mode, rec.MinGeneration)}); err != nil {
 		return nil, err
@@ -562,6 +557,12 @@ func (s *Server) sweep(now time.Time) {
 			s.forget(q)
 		}
 	}
+	for id, l := range s.layouts {
+		if !now.Before(l.expires) {
+			l.layout.Wipe()
+			delete(s.layouts, id)
+		}
+	}
 }
 
 // ── release ──────────────────────────────────────────────────────────────
@@ -610,11 +611,6 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		return nil, fail(http.StatusBadRequest, "a pending request is answered only when sent again unchanged")
 	}
 	switch q.state {
-	case keyboard:
-		if !now.Before(q.expires) {
-			return deny("the keys were not typed in time")
-		}
-		return q.answer, nil // the machine's answer was lost: the same keyboard
 	case pending:
 		if !now.Before(q.expires) {
 			return deny("not approved within 15 minutes")
@@ -685,13 +681,7 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		return deny(checked.SecureBoot.String() + ": this vault releases only to a boot with Secure Boot on")
 	}
 
-	// With a keyboard the pepper comes after the keys (keyboardAnswer): an approval without one
-	// comes first, as ever.
-	waitsForApproval := d.Mode == vaultproto.ModeApprove || d.PepperRequired
-	if d.Keyboard && d.PepperRequired {
-		waitsForApproval = false
-	}
-	if q.state == fresh && waitsForApproval {
+	if q.state == fresh && (d.Mode == vaultproto.ModeApprove || d.PepperRequired) {
 		q.state = pending
 		q.digest = requestDigest(req)
 		q.checked = checked
@@ -701,10 +691,6 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 			return nil, err
 		}
 		return &vaultproto.ReleaseResponse{Status: vaultproto.StatusPending, RetryAfter: RetryAfter}, nil
-	}
-
-	if d.Keyboard {
-		return s.showKeys(q, d, req, checked, entry, now, deny)
 	}
 
 	if d.PepperRequired && len(q.pepper) == 0 { // decide refuses such an approval; this keeps it so
@@ -736,15 +722,33 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		return deny("the vault could not open the device's record")
 	}
 
+	// A keyboard's seed, wrapped before anything is saved: a failure releases nothing.
+	var keyboard *vaultproto.Wrapped
+	if d.Keyboard {
+		if len(d.ReleaseKeyName) == 0 {
+			return deny("this device has no release key to wrap the keyboard for: enrol it again")
+		}
+		w, layout, err := vaultproto.WrapKeyboard(rand.Reader, d.EKPublic, d.ReleaseKeyName)
+		if err != nil {
+			s.log.Printf("device %s: wrapping the keyboard: %v", dev, err)
+			return deny("the vault could not wrap the keyboard for the device's TPM")
+		}
+		keyboard = w
+		s.layouts[q.id] = &shown{request: q.id, device: q.device, created: now, expires: now.Add(LayoutTTL), layout: layout, remote: q.remote}
+	}
 	if checked.Generation > d.MinGeneration {
 		d.MinGeneration = checked.Generation
 	}
 	t := now.UTC()
 	d.LastRelease = &t
 	if err := s.dir.SaveDevice(d); err != nil {
+		if l := s.layouts[q.id]; l != nil {
+			l.layout.Wipe()
+			delete(s.layouts, q.id)
+		}
 		return nil, err
 	}
-	res := &vaultproto.ReleaseResponse{Status: vaultproto.StatusReleased, Remote: &wrapped}
+	res := &vaultproto.ReleaseResponse{Status: vaultproto.StatusReleased, Remote: &wrapped, Keyboard: keyboard}
 	entry.Result, entry.Detail = "released", fmt.Sprintf("generation %d, TPM reset count %d", checked.Generation, checked.ResetCount)
 	if q.state == approved {
 		entry.Detail += ", approved by " + q.actor
@@ -756,168 +760,8 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		}
 		entry.Detail += ", with a pepper"
 	}
-	s.forget(q)
-	if err := s.logAudit(entry); err != nil {
-		return nil, err
-	}
-	return res, nil
-}
-
-// ── a salt typed through a one-time keyboard ─────────────────────────────
-
-// showKeys answers a verified release of a keyboard device: this boot's pad under a fresh K, K for
-// the TPM, and the keys for an operator to read. Nothing is released yet.
-func (s *Server) showKeys(q *request, d *state.Device, req *vaultproto.ReleaseRequest, checked *vaultproto.Checked, entry state.Entry, now time.Time, deny func(string) (*vaultproto.ReleaseResponse, error)) (*vaultproto.ReleaseResponse, error) {
-	if len(d.ReleaseKeyName) == 0 {
-		return deny("this device has no release key to wrap the keyboard for: enrol it again")
-	}
-	kdev, err := s.sealer.Unseal(&d.Sealed)
-	if err != nil {
-		if errors.Is(err, keys.ErrBootStateChanged) {
-			s.log.Printf("device %x: %v", d.ID, err)
-			return deny(keys.ErrBootStateChanged.Error())
-		}
-		s.log.Printf("device %x: unsealing its key: %v", d.ID, err)
-		return deny("the vault could not unseal the device's key")
-	}
-	salt, err := keys.Decrypt(kdev, d.Remote, d.ID)
-	keys.Wipe(kdev)
-	if err != nil {
-		s.log.Printf("device %x: decrypting its record: %v", d.ID, err)
-		return deny("the vault could not open the device's record")
-	}
-	defer keys.Wipe(salt)
-	pad, err := attest.NewKeyboardPad(rand.Reader, len(salt))
-	if err != nil {
-		return nil, err
-	}
-	defer clear(pad)
-	shown, err := attest.KeyboardKeys(salt, pad)
-	if err != nil {
-		return deny("the vault could not open the device's record")
-	}
-	wrapped, k, err := vaultproto.WrapKeyboard(rand.Reader, d.EKPublic, d.ReleaseKeyName, d.ID, pad)
-	if err != nil {
-		clear(shown)
-		s.log.Printf("device %x: wrapping the keyboard: %v", d.ID, err)
-		return deny("the vault could not wrap the keyboard for the device's TPM")
-	}
-	q.state, q.keys, q.key = keyboard, shown, k
-	q.digest, q.checked, q.expires = requestDigest(req), checked, now.Add(PendingTTL)
-	q.answer = &vaultproto.ReleaseResponse{Status: vaultproto.StatusKeyboard, Keyboard: wrapped}
-	entry.Result, entry.Detail = "keyboard", fmt.Sprintf("verified at generation %d; the keys are shown, waiting for them to be typed", checked.Generation)
-	if q.actor != "" {
-		entry.Detail += ", approved by " + q.actor
-	}
-	if err := s.logAudit(entry); err != nil {
-		q.state = fresh
-		return nil, err
-	}
-	return q.answer, nil
-}
-
-func (s *Server) handleKeyboard(w http.ResponseWriter, r *http.Request) {
-	var req vaultproto.KeyboardRequest
-	err := decode(w, r, &req)
-	var res *vaultproto.KeyboardResponse
-	if err == nil {
-		res, err = s.keyboardAnswer(&req, r.RemoteAddr)
-	}
-	s.answer(w, res, err)
-}
-
-// keyboardAnswer takes the proof of the keys. Right, a device without a pepper is done; one with a
-// pepper waits for the operator, and comes back for it. A proof is asked for every time, so nobody
-// without K learns anything of a request's state or gets a pepper out of it.
-func (s *Server) keyboardAnswer(req *vaultproto.KeyboardRequest, remote string) (*vaultproto.KeyboardResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	q := s.requests[req.RequestID]
-	if q == nil || q.key == nil || !bytes.Equal(q.device, req.DeviceID) {
-		return nil, fail(http.StatusNotFound, "no keys were shown for this request")
-	}
-	dev := hex.EncodeToString(q.device)
-	entry := state.Entry{Event: "keyboard", Device: dev, Request: q.id, Remote: remote}
-	if q.checked != nil {
-		entry.SecureBoot, entry.SecureBootRed = q.checked.SecureBoot.String(), q.checked.SecureBoot.Red()
-	}
-	deny := func(reason string) (*vaultproto.KeyboardResponse, error) {
-		s.forget(q)
-		entry.Result, entry.Detail = "denied", reason
-		if err := s.logAudit(entry); err != nil {
-			return nil, err
-		}
-		return &vaultproto.KeyboardResponse{Status: vaultproto.StatusDenied, Reason: reason}, nil
-	}
-	if !now.Before(q.expires) {
-		return deny("the keys were not typed in time")
-	}
-	d, err := s.dir.Device(q.device)
-	if errors.Is(err, state.ErrNotFound) {
-		return deny("unknown device")
-	} else if err != nil {
-		return nil, err
-	}
-	entry.Name = d.Name
-	if d.Revoked {
-		return deny("the device is revoked")
-	}
-	if d.Locked {
-		return deny(fmt.Sprintf("the device is locked after %d failed verifications: an operator must unlock it", MaxFailures))
-	}
-	if !vaultproto.CheckKeyboardProof(q.key, q.id, q.keys, req.Proof) {
-		q.tries++
-		if q.tries >= MaxKeyTries {
-			return deny(fmt.Sprintf("the keys were wrong %d times: this request ends", q.tries))
-		}
-		entry.Result, entry.Detail = "wrong_keys", fmt.Sprintf("try %d of %d", q.tries, MaxKeyTries)
-		if err := s.logAudit(entry); err != nil {
-			return nil, err
-		}
-		return &vaultproto.KeyboardResponse{Status: vaultproto.StatusWrongKeys, Reason: "those are not the keys shown"}, nil
-	}
-	if !q.typed {
-		q.typed = true
-		if d.PepperRequired {
-			q.state, q.expires = pending, now.Add(PendingTTL)
-			entry.Result, entry.Detail = "pending", "the keys are right; waiting for an operator's approval with the pepper"
-			if err := s.logAudit(entry); err != nil {
-				return nil, err
-			}
-			return &vaultproto.KeyboardResponse{Status: vaultproto.StatusPending, RetryAfter: RetryAfter}, nil
-		}
-	}
-	res := &vaultproto.KeyboardResponse{Status: vaultproto.StatusReleased}
-	if d.PepperRequired {
-		switch q.state {
-		case pending:
-			return &vaultproto.KeyboardResponse{Status: vaultproto.StatusPending, RetryAfter: RetryAfter}, nil
-		case denied:
-			return deny("an operator denied the request")
-		}
-		if len(q.pepper) == 0 {
-			return deny("this device was enrolled with a pepper, and the approval carries none")
-		}
-		if res.Pepper, err = vaultproto.SealKeyboardPepper(rand.Reader, q.key, d.ID, q.pepper); err != nil {
-			s.log.Printf("device %s: sealing the pepper: %v", dev, err)
-			return deny("the vault could not seal the pepper")
-		}
-	}
-	if q.checked != nil && q.checked.Generation > d.MinGeneration {
-		d.MinGeneration = q.checked.Generation
-	}
-	t := now.UTC()
-	d.LastRelease = &t
-	if err := s.dir.SaveDevice(d); err != nil {
-		return nil, err
-	}
-	entry.Result, entry.Detail = "released", "the keys are right"
-	if q.actor != "" {
-		entry.Detail += ", approved by " + q.actor
-	}
-	if d.PepperRequired {
-		entry.Detail += ", with a pepper"
+	if d.Keyboard {
+		entry.Detail += ", with a one-time keyboard"
 	}
 	s.forget(q)
 	if err := s.logAudit(entry); err != nil {

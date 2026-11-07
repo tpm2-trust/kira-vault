@@ -71,8 +71,8 @@ type Device struct {
 	// pepper as well, so every release needs an approval carrying it. Such
 	// a device is always in approve mode.
 	PepperRequired bool `json:"pepper_required"`
-	// Keyboard: Remote holds a salt typed through a one-time keyboard, not R: the vault can read it,
-	// to work out the keys it shows at each boot.
+	// Keyboard: the keyslot takes a pepper typed through the vault's one-time keyboard; every
+	// release carries a seed for the TPM, whose layout the vault shows (vaultproto/keyboard.go).
 	Keyboard bool   `json:"keyboard,omitempty"`
 	EKPublic []byte `json:"ek_public"`
 	EKCert   []byte `json:"ek_cert,omitempty"`

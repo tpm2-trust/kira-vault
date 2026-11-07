@@ -37,7 +37,6 @@ vault#    tpm2-kira-vault token create --name db-03                        # pri
 vault#    tpm2-kira-vault tls root > vault-ca.pem                       # the machines' and operators' copy, no secret
 machine#  tpm2-kira luks enrol /dev/sda2 --password tpm --salt vault --url … --pin … --token … --ca vault-ca.pem
 vault#    tpm2-kira-vault devices | requests | audit
-vault#    tpm2-kira-vault requests                                         # also the keys to press, for a salt typed through the one-time keyboard
 vault#    tpm2-kira-vault requests answer                                  # approve, deny or skip; asks a pepper
 vault#    tpm2-kira-vault device revoke db-03                              # a machine reported stolen
 ```
@@ -57,5 +56,11 @@ It serves `GET /v1/requests`, `POST /v1/requests/{id}/approve` (body `{}`
 or `{"pepper":"…"}`), `POST /v1/requests/{id}/deny`, `GET /v1/devices` and
 `GET /v1/devices/{id}`, nothing else, over TLS with the vault's own root
 (`tls root`), which machines and operators verify the vault against.
+
+A keyslot enrolled with `--keyboard-pepper` takes a pepper of the person's that no device keeps: with
+every release the vault sends a seed for that boot, wrapped for the machine's TPM, and shows its
+one-time keyboard layout, in `tpm2-kira-vault requests` (a request in state `released`) and in
+`layout` of `GET /v1/requests`, for 15 minutes, never in the audit. The person types the pepper at
+the machine through it (tpm2-kira's docs/VAULT.md §12a).
 
 `tpm2-kira-vault help` lists every command.

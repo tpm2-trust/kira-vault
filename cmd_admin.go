@@ -212,8 +212,9 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		for _, q := range list {
-			if q.Keys != "" {
-				fmt.Fprintf(stdout, "Request %s of %s: press these keys at the machine: %s\n", q.ID, q.Name, q.Keys)
+			if q.Layout != "" {
+				fmt.Fprintf(stdout, "\nRequest %s of %s: type the pepper through this layout, for this boot alone.\n", q.ID, q.Name)
+				printLayout(stdout, q.KeyboardKeys, q.Layout)
 			}
 		}
 		return nil
@@ -532,4 +533,26 @@ func answerQueue(c *adminClient, ask func(string, bool) (string, error), stdout 
 		fmt.Fprintln(stdout, "No release waits for an operator.")
 	}
 	return nil
+}
+
+// printLayout shows a one-time keyboard on a US keyboard, row by row: for each character of the
+// pepper the person presses the key above the line it is on.
+func printLayout(w io.Writer, keyOrder, layout string) {
+	if len(keyOrder) != len(layout) {
+		fmt.Fprintln(w, "  (the vault sent a malformed layout)")
+		return
+	}
+	for i, row := range attest.KeyboardUS {
+		indent := strings.Repeat(" ", i*2)
+		var keys, types strings.Builder
+		for _, k := range []byte(row) {
+			at := strings.IndexByte(keyOrder, k)
+			if at < 0 {
+				continue
+			}
+			fmt.Fprintf(&keys, " %c ", k)
+			fmt.Fprintf(&types, " %c ", layout[at])
+		}
+		fmt.Fprintf(w, "  key   %s%s\n  types %s%s\n", indent, keys.String(), indent, types.String())
+	}
 }

@@ -3,7 +3,6 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -13,16 +12,15 @@ import (
 	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
 )
 
-var keyboardSalt = []byte("abcd2345")
-
-// keyboardMachine is a machine enrolled with a salt typed through a keyboard, on a Secure Boot boot.
-func (e *env) keyboardMachine(mode vaultproto.ReleaseMode, pepper bool) *vaulttest.Machine {
+// keyboardMachine is a machine enrolled with a pepper typed through the vault's keyboard, on a
+// Secure Boot boot.
+func (e *env) keyboardMachine(mode vaultproto.ReleaseMode) *vaulttest.Machine {
 	e.t.Helper()
 	m, err := vaulttest.NewMachine("db-03")
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	m.KeyboardSalt, m.Pepper = keyboardSalt, pepper
+	m.Keyboard = true
 	if _, err := m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-03", Mode: mode})); err != nil {
 		e.t.Fatalf("enrol: %v", err)
 	}
@@ -31,265 +29,133 @@ func (e *env) keyboardMachine(mode vaultproto.ReleaseMode, pepper bool) *vaultte
 	return m
 }
 
-// typedAt is what the machine holds after the vault's answer: the TPM opens K, K the pad.
-type typedAt struct {
-	id  string
-	key []byte
-	pad []byte
-}
-
-func (e *env) openKeyboard(m *vaulttest.Machine, req *vaultproto.ReleaseRequest, res *vaultproto.ReleaseResponse) *typedAt {
+// openLayout is what the machine makes of a release: the TPM opens the seed, the seed the layout.
+func (e *env) openLayout(m *vaulttest.Machine, res *vaultproto.ReleaseResponse) *attest.KeyboardLayout {
 	e.t.Helper()
-	if res.Status != vaultproto.StatusKeyboard || res.Keyboard == nil || res.Remote != nil {
+	if res.Status != vaultproto.StatusReleased || res.Keyboard == nil || res.Remote == nil {
 		e.t.Fatalf("%+v", res)
 	}
 	name, err := attest.ReleaseKeyName(m.RKPublic, m.SigningPublic(), m.PolicyRef)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	k, err := m.TPM.ActivateCredentialFor(name, res.Keyboard.Key.Credential, res.Keyboard.Key.EncryptedSecret)
+	seed, err := m.TPM.ActivateCredentialFor(name, res.Keyboard.Credential, res.Keyboard.EncryptedSecret)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	pad, err := vaultproto.OpenKeyboardPad(k, m.DeviceID, res.Keyboard)
+	l, err := attest.KeyboardLayoutOf(seed)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return &typedAt{id: req.RequestID, key: k, pad: pad}
+	return l
 }
 
-func (e *env) shownKeys(id string) string {
+func (e *env) shownLayout(id string) *server.RequestView {
 	e.t.Helper()
 	var list []server.RequestView
 	if code, msg := e.adminDo("GET", "/v1/requests", nil, &list); code != 200 {
 		e.t.Fatalf("%d %s", code, msg)
 	}
 	for _, q := range list {
-		if q.ID == id {
-			return q.Keys
+		if q.ID == id && q.Layout != "" {
+			return &q
 		}
 	}
-	return ""
+	return nil
 }
 
-func (e *env) prove(m *vaulttest.Machine, a *typedAt, keys []byte) *vaultproto.KeyboardResponse {
-	e.t.Helper()
-	var rsp vaultproto.KeyboardResponse
-	if err := e.client.Post(vaultproto.PathKeyboard, vaultproto.KeyboardRequest{RequestID: a.id, DeviceID: m.DeviceID, Proof: vaultproto.KeyboardProof(a.key, a.id, keys)}, &rsp); err != nil {
-		e.t.Fatal(err)
-	}
-	return &rsp
-}
-
-// The keys the vault shows and the pad the TPM opened make the salt; the right keys end it, and
-// nothing of the salt, the keys or the pad reaches the audit.
+// A release carries R and the seed; the layout the vault shows is the one the TPM's seed makes, for
+// a while, never in the audit, and every boot another one.
 func TestKeyboardRelease(t *testing.T) {
 	e := newEnv(t)
-	m := e.keyboardMachine(vaultproto.ModeAuto, false)
-	req, res, err := m.Release(e.client)
-	if err != nil {
-		t.Fatal(err)
+	m := e.keyboardMachine(vaultproto.ModeAuto)
+	if !e.deviceView(m).Keyboard {
+		t.Fatal("the device view says no keyboard")
 	}
-	a := e.openKeyboard(m, req, res)
-	keys := e.shownKeys(a.id)
-	if len(keys) != len(keyboardSalt) {
-		t.Fatalf("the keys shown: %q", keys)
-	}
-	got, err := attest.KeyboardSaltOf([]byte(keys), a.pad)
-	if err != nil || !bytes.Equal(got, keyboardSalt) {
-		t.Fatalf("keys %s make %s, %v", keys, got, err)
-	}
-	if e.device(m).LastRelease != nil {
-		t.Fatal("released before the keys")
-	}
-	rsp := e.prove(m, a, []byte(keys))
-	if rsp.Status != vaultproto.StatusReleased || len(rsp.Pepper) != 0 {
-		t.Fatalf("%+v", rsp)
-	}
-	if e.device(m).LastRelease == nil {
-		t.Fatal("no release noted")
-	}
-	if k := e.shownKeys(a.id); k != "" {
-		t.Fatalf("the keys are still shown: %q", k)
-	}
-	// One proof: the request is gone.
-	var again vaultproto.KeyboardResponse
-	err = e.client.Post(vaultproto.PathKeyboard, vaultproto.KeyboardRequest{RequestID: a.id, DeviceID: m.DeviceID, Proof: vaultproto.KeyboardProof(a.key, a.id, []byte(keys))}, &again)
-	wantHTTP(t, err, 404, "no keys were shown")
-
-	lines, _ := json.Marshal(e.auditLines())
-	for _, secret := range []string{string(keyboardSalt), keys} {
-		if strings.Contains(string(lines), secret) {
-			t.Fatalf("the audit holds %q: %s", secret, lines)
-		}
-	}
-}
-
-// Every boot other keys.
-func TestKeyboardDiffersEveryBoot(t *testing.T) {
-	e := newEnv(t)
-	m := e.keyboardMachine(vaultproto.ModeAuto, false)
-	seen := map[string]bool{}
-	for i := 0; i < 5; i++ {
+	var layouts []string
+	for boot := 0; boot < 2; boot++ {
 		req, res, err := m.Release(e.client)
 		if err != nil {
 			t.Fatal(err)
 		}
-		a := e.openKeyboard(m, req, res)
-		keys := e.shownKeys(a.id)
-		if seen[keys] {
-			t.Fatalf("the same keys again: %s", keys)
+		l := e.openLayout(m, res)
+		if r, err := m.Open(res.Remote); err != nil || !bytes.Equal(r, m.R) {
+			t.Fatalf("R: %v", err)
 		}
-		seen[keys] = true
-		if rsp := e.prove(m, a, []byte(keys)); rsp.Status != vaultproto.StatusReleased {
-			t.Fatalf("%+v", rsp)
+		v := e.shownLayout(req.RequestID)
+		if v == nil || v.Layout != l.String() || v.KeyboardKeys != attest.KeyboardKeys || v.State != "released" || v.Name != "db-03" {
+			t.Fatalf("shown %+v, the TPM's %s", v, l)
+		}
+		layouts = append(layouts, v.Layout)
+		lines, _ := json.Marshal(e.auditLines())
+		if strings.Contains(string(lines), v.Layout) {
+			t.Fatalf("the audit holds the layout: %s", lines)
+		}
+		if !strings.Contains(string(lines), "one-time keyboard") {
+			t.Fatalf("the audit says nothing of the keyboard: %s", lines)
+		}
+	}
+	if layouts[0] == layouts[1] {
+		t.Fatal("the same layout twice")
+	}
+	e.clock.Advance(server.LayoutTTL)
+	var list []server.RequestView
+	e.adminDo("GET", "/v1/requests", nil, &list)
+	for _, q := range list {
+		if q.Layout != "" {
+			t.Fatalf("a layout past its time: %+v", q)
 		}
 	}
 }
 
-// Wrong keys are said, and the third ends the request. A proof without K is no proof.
-func TestKeyboardWrongKeys(t *testing.T) {
+// Without a keyboard no seed; approve mode releases, and shows, only after the approval.
+func TestKeyboardOnlyWithIt(t *testing.T) {
 	e := newEnv(t)
-	m := e.keyboardMachine(vaultproto.ModeAuto, false)
-	req, res, err := m.Release(e.client)
-	if err != nil {
-		t.Fatal(err)
+	plain := e.machine(vaultproto.ModeAuto)
+	plain.TPM.SetSecureBoot(attest.SecureBootOn)
+	plain.Approve()
+	if res := e.release(plain); res.Keyboard != nil {
+		t.Fatalf("a seed for a device without a keyboard: %+v", res)
 	}
-	a := e.openKeyboard(m, req, res)
-	if rsp := e.prove(m, a, []byte("aaaaaaaa")); rsp.Status != vaultproto.StatusWrongKeys {
-		t.Fatalf("%+v", rsp)
-	}
-	right := e.shownKeys(a.id)
-	other := &typedAt{id: a.id, key: bytes.Repeat([]byte{9}, vaultproto.SecretSize)}
-	if rsp := e.prove(m, other, []byte(right)); rsp.Status != vaultproto.StatusWrongKeys {
-		t.Fatalf("the right keys without K: %+v", rsp)
-	}
-	if rsp := e.prove(m, a, []byte("bbbbbbbb")); rsp.Status != vaultproto.StatusDenied || !strings.Contains(rsp.Reason, "wrong 3 times") {
-		t.Fatalf("%+v", rsp)
-	}
-	if e.device(m).LastRelease != nil {
-		t.Fatal("released")
-	}
-}
 
-// With a pepper: the keys first, then the operator, then the pepper, under K, since the TPM is
-// closed by then. Before the keys nothing can be approved, and with wrong keys no pepper comes out.
-func TestKeyboardPepperComesAfterTheKeys(t *testing.T) {
-	e := newEnv(t)
-	m := e.keyboardMachine(vaultproto.ModeApprove, true)
-	req, res, err := m.Release(e.client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := e.openKeyboard(m, req, res)
-	keys := e.shownKeys(a.id)
-	if code, _ := e.adminDo("POST", "/v1/requests/"+a.id+"/approve", map[string]any{"pepper": "secret"}, nil); code != 409 {
-		t.Fatalf("approved before the keys: %d", code)
-	}
-	rsp := e.prove(m, a, []byte(keys))
-	if rsp.Status != vaultproto.StatusPending {
-		t.Fatalf("%+v", rsp)
-	}
-	if rsp := e.prove(m, a, []byte(keys)); rsp.Status != vaultproto.StatusPending {
-		t.Fatalf("%+v", rsp)
-	}
-	if code, msg := e.adminDo("POST", "/v1/requests/"+a.id+"/approve", map[string]any{"pepper": "secret"}, nil); code != 200 {
-		t.Fatalf("%d %s", code, msg)
-	}
-	if rsp := e.prove(m, a, []byte("aaaaaaaa")); rsp.Status != vaultproto.StatusWrongKeys || len(rsp.Pepper) != 0 {
-		t.Fatalf("a pepper for wrong keys: %+v", rsp)
-	}
-	rsp = e.prove(m, a, []byte(keys))
-	if rsp.Status != vaultproto.StatusReleased {
-		t.Fatalf("%+v", rsp)
-	}
-	p, err := vaultproto.OpenKeyboardPepper(a.key, m.DeviceID, rsp.Pepper)
-	if err != nil || string(p) != "secret" {
-		t.Fatalf("%q, %v", p, err)
-	}
-}
-
-// An operator's denial ends it, and a device in approve mode without a pepper is approved first.
-func TestKeyboardApprovalAndDenial(t *testing.T) {
-	e := newEnv(t)
-	m := e.keyboardMachine(vaultproto.ModeApprove, false)
-	ch, err := m.Challenge(e.client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := m.ReleaseRequest(ch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	send := func() *vaultproto.ReleaseResponse {
-		var r vaultproto.ReleaseResponse
-		if err := e.client.Post(vaultproto.PathRelease, req, &r); err != nil {
-			t.Fatal(err)
-		}
-		return &r
-	}
-	if r := send(); r.Status != vaultproto.StatusPending {
-		t.Fatalf("%+v", r)
-	}
-	if k := e.shownKeys(req.RequestID); k != "" {
-		t.Fatalf("keys before the approval: %q", k)
+	e = newEnv(t)
+	m := e.keyboardMachine(vaultproto.ModeApprove)
+	req := e.pendingRequest(m)
+	if v := e.shownLayout(req.RequestID); v != nil {
+		t.Fatalf("a layout before the approval: %+v", v)
 	}
 	if code, msg := e.adminDo("POST", "/v1/requests/"+req.RequestID+"/approve", nil, nil); code != 200 {
 		t.Fatalf("%d %s", code, msg)
 	}
-	res := send()
-	a := e.openKeyboard(m, req, res)
-	// The answer lost on the way: the same keyboard again.
-	if again := send(); !bytes.Equal(again.Keyboard.Ciphertext, res.Keyboard.Ciphertext) {
-		t.Fatal("another keyboard for the same request")
+	var res vaultproto.ReleaseResponse
+	if err := e.client.Post(vaultproto.PathRelease, req, &res); err != nil {
+		t.Fatal(err)
 	}
-	if rsp := e.prove(m, a, []byte(e.shownKeys(a.id))); rsp.Status != vaultproto.StatusReleased {
-		t.Fatalf("%+v", rsp)
+	if l := e.openLayout(m, &res); e.shownLayout(req.RequestID).Layout != l.String() {
+		t.Fatal("the layout shown is not the TPM's")
 	}
 }
 
-// No keys for a boot the vault would refuse, and none for a revoked device.
+// No layout for a boot the vault refuses; a keyboard and an operator's pepper are not enrolled
+// together.
 func TestKeyboardRefusals(t *testing.T) {
 	e := newEnv(t)
-	m := e.keyboardMachine(vaultproto.ModeAuto, false)
+	m := e.keyboardMachine(vaultproto.ModeAuto)
 	m.TPM.SetSecureBoot(attest.SecureBootOff)
 	m.Approve()
 	req, res, err := m.Release(e.client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantStatus(t, res, vaultproto.StatusDenied, "Secure Boot on")
-	if k := e.shownKeys(req.RequestID); k != "" {
-		t.Fatalf("keys for a boot without Secure Boot: %q", k)
+	if res.Status != vaultproto.StatusDenied || res.Keyboard != nil || e.shownLayout(req.RequestID) != nil {
+		t.Fatalf("%+v", res)
 	}
 
-	m.TPM.SetSecureBoot(attest.SecureBootOn)
-	m.Approve()
-	req, res, err = m.Release(e.client)
+	both, err := vaulttest.NewMachine("db-04")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := e.openKeyboard(m, req, res)
-	keys := e.shownKeys(a.id)
-	if code, msg := e.adminDo("POST", "/v1/devices/"+e.deviceView(m).ID+"/revoke", nil, nil); code != 200 {
-		t.Fatalf("%d %s", code, msg)
-	}
-	if rsp := e.prove(m, a, []byte(keys)); rsp.Status != vaultproto.StatusDenied {
-		t.Fatalf("a revoked device: %+v", rsp)
-	}
-}
-
-// A bad salt never gets in.
-func TestKeyboardEnrolRefusesABadSalt(t *testing.T) {
-	e := newEnv(t)
-	m, err := vaulttest.NewMachine("db-03")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.KeyboardSalt = []byte("short")
-	_, err = m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-03"}))
-	var se *vaulttest.StatusError
-	if !errors.As(err, &se) || se.Code != 400 {
-		t.Fatalf("%v", err)
-	}
+	both.Keyboard, both.Pepper = true, true
+	_, err = both.Enrol(e.client, e.token(server.TokenRequest{Name: "db-04"}))
+	wantHTTP(t, err, 400, "not taken together")
 }

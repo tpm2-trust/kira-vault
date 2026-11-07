@@ -28,21 +28,21 @@ import (
 
 // Machine is a simulated machine with one tpm+vault keyslot.
 type Machine struct {
-	TPM          *attesttest.SoftTPM
-	Signer       *ecdsa.PrivateKey
-	DeviceID     []byte
-	Name         string
-	PolicyRef    []byte
-	GenIndex     []byte
-	Selection    vaultproto.Selection
-	Gen          uint64
-	Approval     []byte
-	Pepper       bool               // the keyslot is enrolled with an operator's pepper
-	KeyboardSalt []byte             // a salt typed through a one-time keyboard, in place of R
-	R            []byte             // the remote part in the clear, as the machine drew it
-	Remote       vaultproto.Wrapped // R wrapped for the TPM: its EK and the slot's release key
-	RKPublic     []byte             // the slot's release key (TPMT_PUBLIC)
-	RKName       []byte             // and its Name
+	TPM       *attesttest.SoftTPM
+	Signer    *ecdsa.PrivateKey
+	DeviceID  []byte
+	Name      string
+	PolicyRef []byte
+	GenIndex  []byte
+	Selection vaultproto.Selection
+	Gen       uint64
+	Approval  []byte
+	Pepper    bool               // the keyslot is enrolled with an operator's pepper
+	Keyboard  bool               // the keyslot takes a pepper typed through the vault's keyboard
+	R         []byte             // the remote part in the clear, as the machine drew it
+	Remote    vaultproto.Wrapped // R wrapped for the TPM: its EK and the slot's release key
+	RKPublic  []byte             // the slot's release key (TPMT_PUBLIC)
+	RKName    []byte             // and its Name
 }
 
 // NewMachine makes a machine whose signing key approved its PCRs at
@@ -118,7 +118,7 @@ func (m *Machine) EnrolRequest(token string) *vaultproto.EnrolRequest {
 		EKPublic: m.TPM.EKPub, AKPublic: m.TPM.AKPub,
 		SigningPublic: m.SigningPublic(), PolicyRef: m.PolicyRef, GenerationIndexName: m.GenIndex,
 		Generation: m.Gen, Selection: m.Selection, Remote: m.Remote, Label: "root", Pepper: m.Pepper,
-		ReleaseKeyPublic: m.RKPublic, KeyboardSalt: m.KeyboardSalt,
+		ReleaseKeyPublic: m.RKPublic, Keyboard: m.Keyboard,
 	}
 }
 
