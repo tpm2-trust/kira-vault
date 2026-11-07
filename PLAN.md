@@ -1,8 +1,7 @@
 # PLAN: `kira-vault control`
 
-Status: **confirmed by the owner (2026-11-07)**, the vault's keys and their
-approval included; A done (go-tui-slim's `panel` in kira's control); B and C
-started on the owner's word (2026-11-07), branch `feat/vault-keys`.
+Status: **done (2026-11-07)**: A, B and C, branch `feat/vault-keys`. Next: the YubiKey as a
+second approval key (the policies take several keys already).
 
 ## Goal
 
@@ -388,7 +387,7 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   `control --lines` creates the vault, serve in-process (`serve(ctx, d, …,
   ready)`), enrol token, operator add, a PCR extended → "approval due" → approve
   → green; the overview green except the TPM line where it must be.
-- [ ] **C5** kira `tools/vmtest.py`: one check in the vault scenarios -
+- [x] **C5** (the check in `vault-alone`, control run in serve's container: the device, "in a container", the approval in use; VAULT.md §3, §6.1-§6.7, §11; this README) kira `tools/vmtest.py`: one check in the vault scenarios -
   `kira-vault control` without a terminal after the enrolment: the device
   listed, Secure Boot on, the deployment "in a container". Docs: kira
   `docs/VAULT.md` (§2 keys, §3 setup with control and the container, §6.2 keys
