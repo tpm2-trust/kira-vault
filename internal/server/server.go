@@ -50,6 +50,7 @@ import (
 	"github.com/tpm2-trust/kira/core/attest"
 	"github.com/tpm2-trust/kira/core/vaultproto"
 
+	"github.com/tpm2-trust/kira-vault/internal/approval"
 	"github.com/tpm2-trust/kira-vault/internal/keys"
 	"github.com/tpm2-trust/kira-vault/internal/state"
 )
@@ -66,11 +67,21 @@ const (
 	MaxBody      = 1 << 20
 )
 
+// DeviceKeys makes a machine's key K_dev: the vault's master's HMAC of its device ID
+// and its r, in the vault's TPM, under the approval of the vault's live boot state
+// (approval.Keys; a fake in tests). approval.ErrDue: no approval covers the live state.
+type DeviceKeys interface {
+	DeviceKey(id, r []byte) ([]byte, error)
+}
+
+// RSize is the size of a device's r.
+const RSize = 32
+
 // Options configure a Server.
 type Options struct {
 	Dir    state.Dir
 	Config *state.Config
-	Sealer keys.Sealer
+	Keys   DeviceKeys
 	Audit  *state.Audit
 	Pin    string           // the pin of the TLS key, for token create
 	Now    func() time.Time // the clock; time.Now when nil
@@ -82,7 +93,7 @@ type Options struct {
 type Server struct {
 	dir    state.Dir
 	cfg    *state.Config
-	sealer keys.Sealer
+	keys   DeviceKeys
 	audit  *state.Audit
 	pin    string
 	now    func() time.Time
@@ -161,7 +172,7 @@ func New(o Options) *Server {
 		lg = log.New(io.Discard, "", 0)
 	}
 	return &Server{
-		dir: o.Dir, cfg: o.Config, sealer: o.Sealer, audit: o.Audit, pin: o.Pin, now: now, log: lg,
+		dir: o.Dir, cfg: o.Config, keys: o.Keys, audit: o.Audit, pin: o.Pin, now: now, log: lg,
 		enrols:   map[string]*enrolment{},
 		requests: map[string]*request{},
 		layouts:  map[string]*shown{},
@@ -405,9 +416,13 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		return nil, refuse(http.StatusForbidden, "the token expired")
 	}
 
-	kdev, err := keys.NewKey()
-	if err != nil {
-		return nil, err
+	r := randomBytes(RSize)
+	kdev, err := s.keys.DeviceKey(req.DeviceID, r)
+	if errors.Is(err, approval.ErrDue) {
+		s.log.Printf("enrolment of %s refused: %v", dev, err)
+		return nil, refuse(http.StatusServiceUnavailable, err.Error())
+	} else if err != nil {
+		return nil, fmt.Errorf("the device key: %w", err)
 	}
 	defer keys.Wipe(kdev)
 	remoteJSON, err := json.Marshal(req.Remote)
@@ -415,14 +430,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		return nil, err
 	}
 	encRemote, err := keys.Encrypt(kdev, remoteJSON, req.DeviceID)
-	if err != nil {
-		return nil, err
-	}
-	sealed, err := s.sealer.Seal(kdev, s.cfg.PCRs)
-	if err != nil {
-		return nil, fmt.Errorf("sealing the device key: %w", err)
-	}
-	recovery, err := keys.EncryptToRecovery(s.cfg.RecoveryPublic, kdev, req.DeviceID)
+	keys.Wipe(remoteJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -454,8 +462,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		MinGeneration:       req.Generation,
 		EnrolledAt:          now.UTC(),
 		Remote:              encRemote,
-		Sealed:              *sealed,
-		Recovery:            recovery,
+		RDev:                r,
 	}
 
 	if err := s.dir.ConsumeToken(e.tokenHash); errors.Is(err, state.ErrNotFound) {
@@ -635,7 +642,7 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		return nil, err
 	}
 	entry.Name = d.Name
-	if d.Revoked {
+	if d.Revoked || len(d.RDev) == 0 {
 		return deny("the device is revoked")
 	}
 	if d.Locked {
@@ -700,14 +707,14 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		return deny("this device was enrolled before peppers were wrapped for its TPM: enrol it again")
 	}
 
-	kdev, err := s.sealer.Unseal(&d.Sealed)
+	kdev, err := s.keys.DeviceKey(d.ID, d.RDev)
 	if err != nil {
-		if errors.Is(err, keys.ErrBootStateChanged) {
+		if errors.Is(err, approval.ErrDue) {
 			s.log.Printf("device %s: %v", dev, err)
-			return deny(keys.ErrBootStateChanged.Error())
+			return deny(approval.ErrDue.Error())
 		}
-		s.log.Printf("device %s: unsealing its key: %v", dev, err)
-		return deny("the vault could not unseal the device's key")
+		s.log.Printf("device %s: its key: %v", dev, err)
+		return deny("the vault could not make the device's key")
 	}
 	plain, err := keys.Decrypt(kdev, d.Remote, d.ID)
 	keys.Wipe(kdev)

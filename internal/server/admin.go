@@ -39,7 +39,6 @@ type DeviceView struct {
 	EnrolledAt    time.Time              `json:"enrolled_at"`
 	LastRelease   *time.Time             `json:"last_release,omitempty"`
 	Selection     vaultproto.Selection   `json:"selection"`
-	VaultPCRs     []uint8                `json:"vault_pcrs"` // the vault PCRs its key is sealed to
 	// SecureBoot is what the last verified quote established; not established before
 	// the first. SecureBootRed marks every state but on.
 	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
@@ -110,8 +109,13 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/devices", s.adminDevices)
 	mux.HandleFunc("GET /v1/devices/{id}", s.adminDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/revoke", s.adminSetFlag("revoke", func(d *state.Device) { d.Revoked = true }))
-	mux.HandleFunc("POST /v1/devices/{id}/unrevoke", s.adminSetFlag("unrevoke", func(d *state.Device) { d.Revoked = false }))
+	// A revoke is final: r_dev goes, and with it the device's key, for good (and the
+	// record it opened). The way back is a new enrolment (token create --replace).
+	mux.HandleFunc("POST /v1/devices/{id}/revoke", s.adminSetFlag("revoke", func(d *state.Device) {
+		d.Revoked = true
+		clear(d.RDev)
+		d.RDev, d.Remote = nil, nil
+	}))
 	mux.HandleFunc("POST /v1/devices/{id}/unlock", s.adminSetFlag("unlock", func(d *state.Device) { d.Locked, d.Failures = false, 0 }))
 	mux.HandleFunc("POST /v1/devices/{id}/mode", s.adminMode)
 	mux.HandleFunc("GET /v1/requests", s.adminRequests)
@@ -137,7 +141,7 @@ func viewOf(d *state.Device) DeviceView {
 		SecureBoot: sb, SecureBootRed: sb.Red(), SecureBootAt: d.SecureBootAt,
 		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired, Keyboard: d.Keyboard,
 		MinGeneration: d.MinGeneration, Revoked: d.Revoked, Locked: d.Locked, Failures: d.Failures,
-		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection, VaultPCRs: d.Sealed.PCRs,
+		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection,
 	}
 }
 

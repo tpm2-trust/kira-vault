@@ -6,7 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/tpm2-trust/kira/core/attest"
+
+	"github.com/tpm2-trust/kira-vault/internal/approval"
+	"github.com/tpm2-trust/kira-vault/internal/bootstate"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 // locks counts the process locks the commands asked for.
@@ -17,18 +24,46 @@ var locks int
 func TestMain(m *testing.M) {
 	lockProcess = func() error { locks++; return nil }
 	reachable = func(string, string) error { return nil }
+	// The vault host of the tests: its logs say all is well (bootstate's tests say
+	// what they say otherwise), its state directory on an encrypted volume.
+	gatherEvidence = func(string, []byte, []byte) *bootstate.Evidence {
+		return &bootstate.Evidence{SecureBoot: attest.SecureBootFinding{State: attest.SecureBootOn}, Volume: &bootstate.Volume{Name: "root", UUID: "u"}, PCR15Replays: true, Measured: true, MeasuresVolumes: true}
+	}
+	checkEncrypted = func(string) (*bootstate.Volume, error) { return &bootstate.Volume{Name: "root", UUID: "u"}, nil }
+	// A TPM path "fake:NAME" is a software TPM, one per name: init, serve and approve
+	// of a test's vault share it. Any other path is a real one (swtpm, -tags integration).
+	real := newTPM
+	newTPM = func(path string) approval.TPM {
+		if name, ok := strings.CutPrefix(path, "fake:"); ok {
+			fakesMu.Lock()
+			defer fakesMu.Unlock()
+			if fakes[name] == nil {
+				fakes[name] = vaulttest.NewTPM()
+			}
+			return fakes[name]
+		}
+		return real(path)
+	}
 	os.Exit(m.Run())
 }
+
+var (
+	fakesMu sync.Mutex
+	fakes   = map[string]*vaulttest.TPM{}
+)
+
+// fakeTPM is the software TPM of a "fake:" path.
+func fakeTPM(path string) *vaulttest.TPM { return newTPM(path).(*vaulttest.TPM) }
 
 // The commands that hold a secret lock the process first, and stop before anything if
 // it cannot be; the others do not lock.
 func TestSecretCommandsLockFirst(t *testing.T) {
-	for _, cmd := range []string{"init", "serve", "reseal", "token", "request", "requests", "operator"} {
+	for _, cmd := range []string{"init", "serve", "approve", "backup", "token", "request", "requests", "operator"} {
 		if !holdsSecrets(cmd) {
 			t.Errorf("%s does not lock", cmd)
 		}
 	}
-	for _, cmd := range []string{"help", "devices", "device", "operators", "audit", "tls", "config"} {
+	for _, cmd := range []string{"help", "devices", "device", "operators", "audit", "tls", "config", "approvals"} {
 		if holdsSecrets(cmd) {
 			t.Errorf("%s locks, and holds no secret", cmd)
 		}

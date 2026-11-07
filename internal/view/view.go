@@ -73,7 +73,6 @@ func Device(w io.Writer, d *server.DeviceView) {
 	fmt.Fprintf(w, "failures:        %d in a row\n", d.Failures)
 	fmt.Fprintf(w, "min generation:  %d\n", d.MinGeneration)
 	fmt.Fprintf(w, "machine PCRs:    %s (bank 0x%04x)\n", PCRs(d.Selection.Indices), d.Selection.Alg)
-	fmt.Fprintf(w, "vault PCRs:      %s\n", PCRs(d.VaultPCRs))
 	fmt.Fprintf(w, "enrolled:        %s\n", d.EnrolledAt.Local().Format(time.DateTime))
 	fmt.Fprintf(w, "last release:    %s\n", When(d.LastRelease))
 	fmt.Fprintf(w, "secure boot:     %s\n", Red(w, d.SecureBootRed, SecureBootLine(d.SecureBoot, d.SecureBootAt)))

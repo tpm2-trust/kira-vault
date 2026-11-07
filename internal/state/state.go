@@ -2,12 +2,15 @@
 // key, the enrolled devices, the enrolment tokens and the audit log.
 //
 //	config.json             Config
+//	master.json             Master: the master key as the TPM holds it, the approval keys
+//	approvals/<time>.json   one keys.Approval per approval of the vault's boot state
 //	tls/key.pem, cert.pem   the TLS key and its self-signed certificate
 //	devices/<id>.json       one Device per enrolled machine (hex device ID)
 //	tokens/<sha256>.json    one Token per unused enrolment token
 //	operators/<name>.json   one Operator per bearer token of the operator interface
 //	audit.log               JSON lines, append-only
-//	lock                    held by serve, init and reseal (flock)
+//	lock                    held by serve, init and config (flock); approve writes
+//	                        approvals/ beside a running serve
 //
 // The directory is 0700, every file 0600, and every file but the audit log
 // is written atomically (temporary file, fsync, rename, fsync of the
@@ -39,25 +42,20 @@ const DefaultDir = "/var/lib/kira-vault"
 // DefaultAdminSocket is where serve answers the CLI.
 const DefaultAdminSocket = "/run/kira-vault/admin.sock"
 
-// DefaultTPM is the TPM the vault seals its device keys in.
+// DefaultTPM is the TPM the vault's master is in.
 const DefaultTPM = "/dev/tpmrm0"
 
 // Config is config.json.
 type Config struct {
 	Listen      string  `json:"listen"`       // the machine-facing HTTPS address, e.g. ":8443"
 	URL         string  `json:"url"`          // the public URL machines enrol with
-	PCRs        []uint8 `json:"pcrs"`         // the vault's own PCR selection, SHA-256 bank; empty: no PCR policy
+	PCRs        []uint8 `json:"pcrs"`         // the vault's own PCRs its approvals are of, SHA-256 bank
 	TPM         string  `json:"tpm"`          // TPM device or swtpm socket
 	AdminSocket string  `json:"admin_socket"` // the CLI's Unix socket
 
 	// OperatorListen is the operator interface's HTTPS address, e.g.
 	// ":8444"; empty: off.
 	OperatorListen string `json:"operator_listen,omitempty"`
-
-	// RecoveryPublic is the X25519 public key of the recovery key: every
-	// device key is also encrypted to it, and only the recovery key opens
-	// those copies (keys.RecoveryKey).
-	RecoveryPublic []byte `json:"recovery_public"`
 }
 
 // Device is devices/<id>.json: what the vault pinned of a machine at
@@ -101,10 +99,10 @@ type Device struct {
 	// Remote is the machine's wrapped R (the JSON of a vaultproto.Wrapped),
 	// encrypted with AES-256-GCM under K_dev, the device ID as AAD.
 	Remote []byte `json:"remote"`
-	// Sealed is K_dev, sealed in the vault's TPM.
-	Sealed keys.Sealed `json:"sealed"`
-	// Recovery is K_dev encrypted to the recovery key, the device ID as AAD.
-	Recovery []byte `json:"recovery"`
+	// RDev is the device's r: K_dev is the master's HMAC of the device ID and it, in
+	// the vault's TPM. A revoke deletes it, and K_dev cannot be made again by anyone,
+	// with or without the backup.
+	RDev []byte `json:"r_dev,omitempty"`
 }
 
 // Pinned is what VerifyRelease checks a release request against.
@@ -154,7 +152,7 @@ func (d Dir) AuditPath() string { return d.path("audit.log") }
 
 // Create makes the directory tree, 0700.
 func (d Dir) Create() error {
-	for _, p := range []string{d.Path, d.path("tls"), d.path("devices"), d.path("tokens"), d.path("operators")} {
+	for _, p := range []string{d.Path, d.path("tls"), d.path("devices"), d.path("tokens"), d.path("operators"), d.path("approvals")} {
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			return err
 		}
@@ -205,6 +203,90 @@ func (d Dir) Config() (*Config, error) {
 
 // SaveConfig writes config.json.
 func (d Dir) SaveConfig(c *Config) error { return writeJSON(d.path("config.json"), c) }
+
+// ApprovalKey is one of the vault's approval keys: in its TPM (Kind "tpm"), behind
+// the approval PIN.
+type ApprovalKey struct {
+	Kind string    `json:"kind"`
+	Key  keys.Blob `json:"key"`
+}
+
+// Master is master.json: the master key as its TPM holds it, imported under the
+// policy of the approval keys, in their order (the policy's PolicyOR).
+type Master struct {
+	Master       keys.Blob     `json:"master"`
+	ApprovalKeys []ApprovalKey `json:"approval_keys"`
+}
+
+// KeyNames are the approval keys' Names, in their order.
+func (m *Master) KeyNames() ([][]byte, error) {
+	var out [][]byte
+	for i := range m.ApprovalKeys {
+		n, err := m.ApprovalKeys[i].Key.Name()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// SaveMaster writes master.json.
+func (d Dir) SaveMaster(m *Master) error { return writeJSON(d.path("master.json"), m) }
+
+// Master reads master.json; a state directory without it is an earlier vault's.
+func (d Dir) Master() (*Master, error) {
+	var m Master
+	if err := readJSON(d.path("master.json"), &m); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("%s has no master.json: a vault of an earlier version, whose keys were sealed and copied to a recovery key - make the vault again (kira-vault init) and enrol the machines with it again", d.Path)
+		}
+		return nil, err
+	}
+	if len(m.ApprovalKeys) == 0 {
+		return nil, errors.New("master.json names no approval key")
+	}
+	return &m, nil
+}
+
+// SaveApproval writes an approval, named by its time.
+func (d Dir) SaveApproval(a *keys.Approval) error {
+	if err := os.MkdirAll(d.path("approvals"), 0o700); err != nil {
+		return err
+	}
+	return writeJSON(d.path("approvals", a.Time.UTC().Format("20060102T150405.000000000Z")+".json"), a)
+}
+
+// Approvals reads every approval, the newest first.
+func (d Dir) Approvals() ([]*keys.Approval, error) {
+	ents, err := os.ReadDir(d.path("approvals"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var out []*keys.Approval
+	for _, e := range ents {
+		if !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		var a keys.Approval
+		if err := readJSON(d.path("approvals", e.Name()), &a); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	return out, nil
+}
+
+// ClearApprovals removes every approval: a restore's, whose keys they were not made with.
+func (d Dir) ClearApprovals() error {
+	if err := os.RemoveAll(d.path("approvals")); err != nil {
+		return err
+	}
+	return os.MkdirAll(d.path("approvals"), 0o700)
+}
 
 // DeviceFile is the file name of a device ID.
 func DeviceFile(id []byte) string { return hex.EncodeToString(id) + ".json" }

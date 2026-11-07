@@ -340,7 +340,14 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   systemd's measurement log, the state directory's volume found through `/sys`
   and its `cryptsetup:` event; the dm-crypt start check where nothing is
   measured. Unit tests on fixture logs and a fixture `/sys` tree.
-- [ ] **B5** The vault on the master: `init` (draws, shows the backup, the PIN,
+- [x] **B5** (decided while doing it: serve starts without an approval of the live state,
+  says so in its log and denies every release and enrolment with the advice to approve;
+  with PCR 15 in the selection it refuses to start unless the state directory is on
+  dm-crypt; approve and approvals run beside serve, which reads the approvals at each
+  release; the selection is at least one PCR, 7 and 15 by default; kira's vmtest approves
+  PCR 23, a software TPM having no firmware log for PCR 7. The YubiKey as a second
+  approval key is its own step after C: the master's and the counter's policies take
+  several keys already, a key added makes both again from the backup) The vault on the master: `init` (draws, shows the backup, the PIN,
   imports, the approval key, the first approval), `init --restore`, `approve
   [--yubikey]`, `approvals`, `backup check`, `approval-key add --yubikey`;
   enrolment stores `r_dev`, a release derives `K_dev`; `device revoke` deletes
