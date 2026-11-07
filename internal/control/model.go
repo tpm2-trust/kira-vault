@@ -98,7 +98,11 @@ func Lines(f *Facts, now time.Time) []Line {
 	case Unit:
 		add("deployment", judgeGood, "serve runs under kira-vault.service")
 	case Container:
-		add("deployment", judgeGood, "serve runs in a container (%s)", strings.TrimSpace(d.Engine+" "+d.Detail))
+		how := d.Detail
+		if d.Engine != "" {
+			how = d.Engine + ": " + how
+		}
+		add("deployment", judgeGood, "serve runs in a container (%s)", how)
 	case Elsewhere:
 		add("deployment", judgeOrange, "serve runs, neither under the unit nor in a container (%s): control does not stop or start it", d.Detail)
 	default:
@@ -184,9 +188,9 @@ func Lines(f *Facts, now time.Time) []Line {
 		}
 		for _, t := range f.TLS {
 			if t.Err != nil {
-				add(t.Interface, judgeRed, "%s does not answer as the vault (%v)", t.Addr, t.Err)
+				add(t.Interface+"' port", judgeRed, "%s does not answer as the vault (%v)", t.Addr, t.Err)
 			} else {
-				add(t.Interface, judgeGood, "%s answers, verified against the root and its pin", t.Addr)
+				add(t.Interface+"' port", judgeGood, "%s answers, verified against the root and its pin", t.Addr)
 			}
 		}
 		switch op := f.Config.OperatorListen; {
