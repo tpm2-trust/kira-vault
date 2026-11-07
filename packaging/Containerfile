@@ -1,0 +1,12 @@
+# kira-vault in a container: the static release binary (make build: the pinned core,
+# GOWORK=off, CGO_ENABLED=0) and nothing else. make container builds it.
+#
+# It needs the TPM device and nothing else of the host's, its state directory and
+# its runtime directory as volumes, and no limit on locked memory (it locks itself
+# before it holds a key); the firmware's event log and systemd's measurement log
+# read-only, for an approval's checks. packaging/kira-vault.container.in runs it so.
+FROM scratch
+COPY kira-vault /kira-vault
+EXPOSE 8443 8444
+ENTRYPOINT ["/kira-vault"]
+CMD ["serve", "--dir", "/var/lib/kira-vault"]

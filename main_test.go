@@ -5,33 +5,40 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"github.com/tpm2-trust/kira-vault/internal/view"
 	"io"
 	"net"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/approval"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 // vault is a state directory made by init, and serve running on it.
 type vault struct {
-	t        *testing.T
-	dir      string
-	sock     string
-	url      string
-	pin      string
-	root     []byte // the vault's root, as 'tls root' prints it
-	recovery string
-	stop     func()
+	t      *testing.T
+	dir    string
+	sock   string
+	url    string
+	pin    string
+	root   []byte // the vault's root, as 'tls root' prints it
+	backup string // the master's backup, as init shows it
+	tpm    string
+	stop   func()
 }
+
+// testPIN is the approval PIN of the tests' vaults.
+const testPIN = "246810"
 
 func freePort(t *testing.T) string {
 	t.Helper()
@@ -53,27 +60,37 @@ func cli(t *testing.T, stdin string, args ...string) (string, error) {
 
 var (
 	pinRE      = regexp.MustCompile(`pin:\s+(sha256:[0-9a-f]{64})`)
-	recoveryRE = regexp.MustCompile(`\n    ([A-Z2-7]{4}(?:-[A-Z2-7]{1,4}){12})\n`)
+	backupRE   = regexp.MustCompile(`\n    ([A-Z2-7]{5}(?:-[A-Z2-7]{5}){10})\n`)
 	tokenRE    = regexp.MustCompile(`token:\s+(\S+)`)
 	operatorRE = regexp.MustCompile(`token \(shown this once\):\n\n  (\S+)\n`)
 )
 
-// initVault runs init with these extra arguments.
+// initVault runs init with these extra arguments, on a software TPM of its own unless
+// they name one; the approval PIN is testPIN.
 func initVault(t *testing.T, extra ...string) *vault {
 	t.Helper()
 	dir := t.TempDir()
 	addr := freePort(t)
-	v := &vault{t: t, dir: filepath.Join(dir, "state"), sock: filepath.Join(dir, "admin.sock"), url: "https://" + addr}
-	out, err := cli(t, "", append([]string{"init", "--dir", v.dir, "--listen", addr, "--url", v.url, "--admin-socket", v.sock}, extra...)...)
+	v := &vault{t: t, dir: filepath.Join(dir, "state"), sock: filepath.Join(dir, "admin.sock"), url: "https://" + addr, tpm: "fake:" + dir}
+	args := []string{"init", "--dir", v.dir, "--listen", addr, "--url", v.url, "--admin-socket", v.sock}
+	for i, a := range extra {
+		if a == "--tpm" && i+1 < len(extra) {
+			v.tpm = extra[i+1]
+		}
+	}
+	if !slices.Contains(extra, "--tpm") {
+		args = append(args, "--tpm", v.tpm)
+	}
+	out, err := cli(t, testPIN+"\n"+testPIN+"\n", append(args, extra...)...)
 	if err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
 	m := pinRE.FindStringSubmatch(out)
-	r := recoveryRE.FindStringSubmatch(out)
-	if m == nil || r == nil {
+	b := backupRE.FindStringSubmatch(out)
+	if m == nil || b == nil {
 		t.Fatalf("init output:\n%s", out)
 	}
-	v.pin, v.recovery = m[1], r[1]
+	v.pin, v.backup = m[1], b[1]
 	root, err := cli(t, "", "tls", "root", "--dir", v.dir)
 	if err != nil || !strings.HasPrefix(root, "-----BEGIN CERTIFICATE-----") {
 		t.Fatalf("tls root: %v\n%s", err, root)
@@ -160,7 +177,7 @@ func (v *vault) enrolWith(name string, pepper bool) *vaulttest.Machine {
 		v.t.Fatalf("token create: %v\n%s", err, out)
 	}
 	tok := tokenRE.FindStringSubmatch(out)
-	if tok == nil || !strings.Contains(out, "tpm2-kira vault enrol --url "+v.url+" --pin "+v.pin+" --token "+tok[1]) {
+	if tok == nil || !strings.Contains(out, "kira vault enrol --url "+v.url+" --pin "+v.pin+" --token "+tok[1]) {
 		v.t.Fatalf("token create output:\n%s", out)
 	}
 	m, err := vaulttest.NewMachine(name)
@@ -193,18 +210,9 @@ func wantReleased(t *testing.T, m *vaulttest.Machine, res *vaultproto.ReleaseRes
 	}
 }
 
-// useSealer makes the commands seal with s.
-func useSealer(t *testing.T, s keys.Sealer) {
-	old := newSealer
-	newSealer = func(string) keys.Sealer { return s }
-	t.Cleanup(func() { newSealer = old })
-}
-
-// init, serve, the admin commands and reseal, end to end, with a sealer
-// whose boot state the test moves.
+// init, serve, the admin commands and an approval of a moved boot state, end to end,
+// on a software TPM whose PCRs the test moves.
 func TestCommands(t *testing.T) {
-	sealer := vaulttest.NewSealer()
-	useSealer(t, sealer)
 	v := initVault(t)
 	opAddr := freePort(t)
 	if _, err := cli(t, "", "init", "--dir", v.dir, "--url", v.url); err == nil || !strings.Contains(err.Error(), "holds a vault already") {
@@ -215,12 +223,30 @@ func TestCommands(t *testing.T) {
 	m := v.enrol("db-03")
 	wantReleased(t, m, v.release(m))
 
-	// init and reseal refuse while serve runs.
-	if _, err := cli(t, v.recovery+"\n", "reseal", "--dir", v.dir); !errors.Is(err, state.ErrLocked) {
-		t.Fatalf("reseal while serving: %v", err)
+	// status: the vault as it runs.
+	out, err := cli(t, "", "status", "--socket", v.sock)
+	if err != nil || !strings.Contains(out, "approval:      in use") || !strings.Contains(out, "FAKE") || !strings.Contains(out, "devices:       1\n") {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	// token list and withdraw.
+	out, _ = cli(t, "", "token", "create", "--name", "spare", "--socket", v.sock)
+	if out, err = cli(t, "", "token", "list", "--socket", v.sock); err != nil || !strings.Contains(out, "spare") {
+		t.Fatalf("token list: %v\n%s", err, out)
+	}
+	id := regexp.MustCompile(`(?m)^([0-9a-f]{16})\s+spare`).FindStringSubmatch(out)
+	if id == nil {
+		t.Fatalf("token list:\n%s", out)
+	}
+	if out, err = cli(t, "", "token", "withdraw", id[1], "--socket", v.sock); err != nil || !strings.Contains(out, "withdrawn") {
+		t.Fatalf("token withdraw: %v\n%s", err, out)
 	}
 
-	out, err := cli(t, "", "devices", "--dir", v.dir)
+	// approve works beside a running serve: nothing to approve now.
+	if out, err := cli(t, "", "approve", "--dir", v.dir); err != nil || !strings.Contains(out, "approved already") {
+		t.Fatalf("approve while serving: %v\n%s", err, out)
+	}
+
+	out, err = cli(t, "", "devices", "--dir", v.dir)
 	if err != nil || !strings.Contains(out, "db-03") || !strings.Contains(out, "active") {
 		t.Fatalf("devices: %v\n%s", err, out)
 	}
@@ -231,7 +257,19 @@ func TestCommands(t *testing.T) {
 	if res := v.release(m); res.Status != vaultproto.StatusDenied {
 		t.Fatalf("a revoked device: %s", res.Status)
 	}
-	cli(t, "", "device", "unrevoke", "db-03", "--socket", v.sock)
+	// A revoke is final: the way back is a new enrolment.
+	if _, err := cli(t, "", "device", "unrevoke", "db-03", "--socket", v.sock); err == nil {
+		t.Fatal("unrevoke ran")
+	}
+	out, err = cli(t, "", "token", "create", "--name", "db-03", "--replace", "db-03", "--socket", v.sock)
+	tok := tokenRE.FindStringSubmatch(out)
+	if err != nil || tok == nil {
+		t.Fatalf("token --replace: %v\n%s", err, out)
+	}
+	if _, err := m.Enrol(v.client(), tok[1]); err != nil {
+		t.Fatalf("enrol again: %v", err)
+	}
+	wantReleased(t, m, v.release(m))
 	if out, err = cli(t, "", "device", "mode", "db-03", "approve", "--socket", v.sock); err != nil || !strings.Contains(out, "approve") {
 		t.Fatalf("mode: %v\n%s", err, out)
 	}
@@ -258,23 +296,42 @@ func TestCommands(t *testing.T) {
 		t.Fatalf("show an unknown device: %v", err)
 	}
 
-	// The vault boots in another state: denied with advice, until reseal.
-	v.stop()
-	sealer.ChangeBoot()
-	v.start()
+	// The vault boots in another state: denied with advice, until approved - beside
+	// the running serve, with the PIN; a wrong one is refused.
+	fakeTPM(v.tpm).Extend(15, "a volume opened")
 	res = v.release(m)
-	if res.Status != vaultproto.StatusDenied || res.Reason != "the vault's own boot state changed: run reseal" {
+	if res.Status != vaultproto.StatusDenied || res.Reason != approval.ErrDue.Error() {
 		t.Fatalf("after the vault's boot changed: %+v", res)
 	}
-	v.stop()
-	if _, err := cli(t, "AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA\n", "reseal", "--dir", v.dir); err == nil || !strings.Contains(err.Error(), "not this vault's recovery key") {
-		t.Fatalf("reseal with another key: %v", err)
+	if out, err := cli(t, "", "approvals", "--dir", v.dir); err != nil || !strings.Contains(out, "No approval covers") {
+		t.Fatalf("approvals while due: %v\n%s", err, out)
 	}
-	if out, err := cli(t, strings.ToLower(v.recovery)+"\n", "reseal", "--dir", v.dir); err != nil || !strings.Contains(out, "Resealed 1 device keys to the vault's PCRs 7") {
-		t.Fatalf("reseal: %v\n%s", err, out)
+	if out, err := cli(t, "", "status", "--socket", v.sock); err != nil || !strings.Contains(out, "WARNING: DUE: PCR 15 moved") {
+		t.Fatalf("status while due: %v\n%s", err, out)
 	}
-	v.start()
+	if _, err := cli(t, "999999\n", "approve", "--dir", v.dir); !errors.Is(err, keys.ErrWrongPIN) {
+		t.Fatalf("approve with a wrong PIN: %v", err)
+	}
+	out, err = cli(t, testPIN+"\n", "approve", "--dir", v.dir)
+	if err != nil || !strings.Contains(out, "PCR 15  MOVED") || !strings.Contains(out, "PCR  7  the same") || !strings.Contains(out, "counter 2") {
+		t.Fatalf("approve: %v\n%s", err, out)
+	}
 	wantReleased(t, m, v.release(m))
+	if out, err := cli(t, "", "approvals", "--dir", v.dir); err != nil || strings.Count(out, "yes: in use") != 1 || !strings.Contains(out, "\n") {
+		t.Fatalf("approvals: %v\n%s", err, out)
+	}
+	// The backup checks; one with a typo, or another vault's, does not.
+	if out, err := cli(t, strings.ToLower(v.backup)+"\n", "backup", "check", "--dir", v.dir); err != nil || !strings.Contains(out, "is this vault's") {
+		t.Fatalf("backup check: %v\n%s", err, out)
+	}
+	typo := []byte(v.backup)
+	typo[0] = map[bool]byte{true: 'B', false: 'A'}[typo[0] == 'A']
+	if _, err := cli(t, string(typo)+"\n", "backup", "check", "--dir", v.dir); !errors.Is(err, keys.ErrNotABackup) {
+		t.Fatalf("a backup with a typo: %v", err)
+	}
+	if _, err := cli(t, initVault(t).backup+"\n", "backup", "check", "--dir", v.dir); !errors.Is(err, keys.ErrNotTheBackup) {
+		t.Fatalf("another vault's backup: %v", err)
+	}
 	v.stop()
 
 	// The operator interface: config set refuses while serve runs, and
@@ -324,21 +381,16 @@ func TestCommands(t *testing.T) {
 	}
 	v.stop()
 
-	// Reseal to no PCRs warns, and is kept in the configuration.
-	out, err = cli(t, v.recovery+"\n", "reseal", "--dir", v.dir, "--pcrs", "")
-	if err != nil || !strings.Contains(out, "Warning: the vault's selection is empty") {
-		t.Fatalf("reseal to no PCRs: %v\n%s", err, out)
-	}
-	cfg, _ := state.Dir{Path: v.dir}.Config()
-	if len(cfg.PCRs) != 0 {
-		t.Fatalf("configured PCRs %v", cfg.PCRs)
+	// An approval is of at least one PCR.
+	if _, err := cli(t, "", "init", "--dir", filepath.Join(t.TempDir(), "x"), "--pcrs", ""); err == nil || !strings.Contains(err.Error(), "at least one PCR") {
+		t.Fatalf("init without PCRs: %v", err)
 	}
 }
 
 func TestParsePCRs(t *testing.T) {
 	for in, want := range map[string]string{"7": "7", "14, 7,0,7": "0,7,14", "": "none"} {
 		got, err := parsePCRs(in)
-		if err != nil || formatPCRs(got) != want {
+		if err != nil || view.PCRs(got) != want {
 			t.Fatalf("%q: %v %v", in, got, err)
 		}
 	}
@@ -357,7 +409,6 @@ func TestParsePCRs(t *testing.T) {
 // through what waits - deny, skip, approve with the pepper - and says when
 // nothing does.
 func TestCLIAnswersTheQueue(t *testing.T) {
-	useSealer(t, vaulttest.NewSealer())
 	v := initVault(t)
 	v.start()
 	defer v.stop()
@@ -457,4 +508,46 @@ func secureBootInTheCLI(t *testing.T, v *vault, m *vaulttest.Machine) {
 	}
 	m.TPM.SetSecureBoot(attest.SecureBootOn)
 	m.Approve()
+}
+
+// restoreInto restores v's master from its backup into the TPM at path, in v's state
+// directory (as if restored from a backup of it): the machines enrolled before are
+// released to as before.
+func restoreInto(t *testing.T, v *vault, path string) {
+	t.Helper()
+	d := state.Dir{Path: v.dir}
+	cfg, err := d.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.TPM = path
+	if err := d.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	out, err := cli(t, v.backup+"\n"+testPIN+"\n"+testPIN+"\n", "init", "--restore", "--dir", v.dir)
+	if err != nil || !strings.Contains(out, "Restored the vault's master") {
+		t.Fatalf("restore: %v\n%s", err, out)
+	}
+	v.tpm = path
+}
+
+// The TPM is lost: the backup and the state directory make the vault again in another
+// TPM, and every machine is released to as before; another vault's backup is refused.
+func TestRestore(t *testing.T) {
+	v := initVault(t)
+	v.start()
+	m := v.enrol("db-03")
+	wantReleased(t, m, v.release(m))
+	v.stop()
+
+	other := initVault(t)
+	if _, err := cli(t, other.backup+"\n", "init", "--restore", "--dir", v.dir); !errors.Is(err, keys.ErrNotTheBackup) {
+		t.Fatalf("another vault's backup: %v", err)
+	}
+	restoreInto(t, v, "fake:"+t.TempDir())
+	if a, _ := (state.Dir{Path: v.dir}).Approvals(); len(a) != 1 {
+		t.Fatalf("the approvals after a restore: %d", len(a))
+	}
+	v.start()
+	wantReleased(t, m, v.release(m))
 }

@@ -3,19 +3,21 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/approval"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
-// The vault on a software TPM: a release, the vault's PCR 23 moves and the
-// release is denied with "run reseal" (the device not held responsible),
-// reseal with the recovery key, a release again. A device enrolled with a
-// pepper is approved over the operator interface with it, and released
-// with it.
+// The vault on a software TPM: a release; the vault's PCR 23 moves, and every release
+// is denied with the advice to approve (the device not held responsible); approved
+// with the PIN beside the running serve, releases again. A device enrolled with a
+// pepper is approved over the operator interface with it. The TPM is lost: the
+// backup restores the master into another, and both are released to as before.
 func TestVaultOnSWTPM(t *testing.T) {
 	sock := vaulttest.StartSWTPM(t)
 	v := initVault(t, "--tpm", sock, "--pcrs", "7,23", "--operator-listen", freePort(t))
@@ -33,24 +35,60 @@ func TestVaultOnSWTPM(t *testing.T) {
 	vaulttest.ExtendPCR(t, sock, 23, "another boot of the vault")
 	for i := 0; i < 6; i++ {
 		res := v.release(m)
-		if res.Status != vaultproto.StatusDenied || res.Reason != "the vault's own boot state changed: run reseal" {
+		if res.Status != vaultproto.StatusDenied || res.Reason != approval.ErrDue.Error() {
 			t.Fatalf("after PCR 23 moved: %+v", res)
 		}
 	}
-	v.stop()
 	d, _ := state.Dir{Path: v.dir}.Devices()
 	if len(d) != 2 || d[0].Locked || d[0].Failures != 0 {
 		t.Fatalf("the device after the vault's denials: %+v", d)
 	}
-
-	if out, err := cli(t, v.recovery+"\n", "reseal", "--dir", v.dir); err != nil {
-		t.Fatalf("reseal: %v\n%s", err, out)
+	if out, err := cli(t, testPIN+"\n", "approve", "--dir", v.dir); err != nil || !strings.Contains(out, "PCR 23  MOVED") {
+		t.Fatalf("approve: %v\n%s", err, out)
 	}
+	wantReleased(t, m, v.release(m))
+	res = approve(t, v, alice, p, `{"pepper":"from the operator"}`)
+	wantReleased(t, p, res)
+	v.stop()
+
+	restoreInto(t, v, vaulttest.StartSWTPM(t))
 	v.start()
 	wantReleased(t, m, v.release(m))
 	res = approve(t, v, alice, p, `{"pepper":"from the operator"}`)
 	wantReleased(t, p, res)
-	if got, err := p.OpenPepper(res.Pepper); err != nil || got != "from the operator" {
-		t.Fatalf("released pepper after reseal %q: %v", got, err)
+}
+
+// control on a vault of a software TPM: it prints what the vault is, judged - serve
+// answering (here in-process: neither the unit nor a container), the approval in use,
+// the machines' port verified against the root, the device - and after the vault's
+// PCR moved, the approval due, until approved.
+func TestControlOnSWTPM(t *testing.T) {
+	sock := vaulttest.StartSWTPM(t)
+	v := initVault(t, "--tpm", sock, "--pcrs", "23")
+	v.start()
+	v.enrol("db-03")
+	look := func() string {
+		t.Helper()
+		out, err := cli(t, "", "control", "--dir", v.dir, "--socket", v.sock)
+		if err != nil {
+			t.Fatalf("control: %v\n%s", err, out)
+		}
+		return out
+	}
+	out := look()
+	for _, want := range []string{"serve runs, neither under the unit nor in a container", "approval", "in use", "answers, verified against the root and its pin", "1 enrolled", "Enrol a machine", "kira-vault token create"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("control lacks %q:\n%s", want, out)
+		}
+	}
+	vaulttest.ExtendPCR(t, sock, 23, "another boot of the vault")
+	if out := look(); !strings.Contains(out, "due: PCR 23 moved") {
+		t.Fatalf("control after PCR 23 moved:\n%s", out)
+	}
+	if out, err := cli(t, testPIN+"\n", "approve", "--dir", v.dir); err != nil {
+		t.Fatalf("approve: %v\n%s", err, out)
+	}
+	if out := look(); strings.Contains(out, "due") {
+		t.Fatalf("control after the approval:\n%s", out)
 	}
 }

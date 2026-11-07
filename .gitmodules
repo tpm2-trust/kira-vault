@@ -1,3 +1,9 @@
-[submodule "tpm2-kira"]
-	path = tpm2-kira
-	url = https://github.com/tpm2-trust/tpm2-kira.git
+[submodule "kira"]
+	path = kira
+	url = https://github.com/tpm2-trust/kira.git
+[submodule "go-tui-slim"]
+	path = go-tui-slim
+	url = https://github.com/tpm2-trust/go-tui-slim.git
+[submodule "go-uefi-slim"]
+	path = go-uefi-slim
+	url = https://github.com/tpm2-trust/go-uefi-slim.git

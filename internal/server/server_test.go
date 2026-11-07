@@ -16,16 +16,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/attest/attesttest"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/attest/attesttest"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/keys"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/approval"
+	"github.com/tpm2-trust/kira-vault/internal/keys"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/tlsutil"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 type env struct {
@@ -33,8 +34,7 @@ type env struct {
 	dir    state.Dir
 	cfg    *state.Config
 	clock  *vaulttest.Clock
-	sealer *vaulttest.Sealer
-	rk     *keys.RecoveryKey
+	keys   *vaulttest.Keys
 	srv    *server.Server
 	admin  http.Handler
 	ts     *httptest.Server
@@ -46,7 +46,7 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	e := &env{t: t, dir: state.Dir{Path: t.TempDir()}, clock: vaulttest.NewClock(), sealer: vaulttest.NewSealer()}
+	e := &env{t: t, dir: state.Dir{Path: t.TempDir()}, clock: vaulttest.NewClock(), keys: vaulttest.NewKeys()}
 	if err := e.dir.Create(); err != nil {
 		t.Fatal(err)
 	}
@@ -59,17 +59,13 @@ func newEnv(t *testing.T) *env {
 	}
 	pin := certs.Pin()
 	e.pin, e.root, e.certs = pin, certs.RootPEM(), certs
-	if e.rk, err = keys.NewRecoveryKey(); err != nil {
-		t.Fatal(err)
-	}
-	rpub, _ := e.rk.Public()
-	e.cfg = &state.Config{Listen: ":0", URL: "https://vault.example:8443", PCRs: []uint8{7}, RecoveryPublic: rpub}
+	e.cfg = &state.Config{Listen: ":0", URL: "https://vault.example:8443", PCRs: []uint8{7, 15}}
 	audit, err := state.OpenAudit(e.dir.AuditPath(), e.clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { audit.Close() })
-	e.srv = server.New(server.Options{Dir: e.dir, Config: e.cfg, Sealer: e.sealer, Audit: audit, Pin: pin, Now: e.clock.Now})
+	e.srv = server.New(server.Options{Dir: e.dir, Config: e.cfg, Keys: e.keys, Audit: audit, Pin: pin, Now: e.clock.Now})
 	e.admin = e.srv.AdminHandler()
 	e.ts = httptest.NewUnstartedServer(e.srv.MachineHandler())
 	startVaultTLS(e.ts, certs) // the refused handshake of TestPin goes nowhere
@@ -185,16 +181,16 @@ func TestEnrolAndRelease(t *testing.T) {
 	e := newEnv(t)
 	m := e.machine(0)
 	d := e.device(m)
-	if d.Mode != vaultproto.ModeAuto || d.MinGeneration != 5 || d.Name != "db-03" || len(d.Recovery) == 0 || len(d.Sealed.PCRs) != 1 {
+	if d.Mode != vaultproto.ModeAuto || d.MinGeneration != 5 || d.Name != "db-03" || len(d.RDev) != server.RSize {
 		t.Fatalf("device record %+v", d)
 	}
 	if bytes.Contains(d.Remote, m.Remote.Credential) {
 		t.Fatal("the wrapped remote part is stored in the clear")
 	}
-	// The recovery key opens the device key; the device key opens the record.
-	kdev, err := e.rk.Open(d.Recovery, d.ID)
+	// The master's key of the device ID and r_dev opens the record, and no other ID.
+	kdev, err := e.keys.DeviceKey(d.ID, d.RDev)
 	if err != nil {
-		t.Fatalf("recovery copy: %v", err)
+		t.Fatalf("the device key: %v", err)
 	}
 	if _, err := keys.Decrypt(kdev, d.Remote, d.ID); err != nil {
 		t.Fatalf("record under the recovered key: %v", err)
@@ -267,8 +263,8 @@ func TestAudit(t *testing.T) {
 			t.Fatal("the log ended early")
 		}
 	}
-	e.adminDo("POST", "/v1/devices/web-1/unrevoke", nil, nil)
-	if !sc.Scan() || !strings.Contains(sc.Text(), `"event":"unrevoke"`) {
+	e.adminDo("POST", "/v1/devices/web-1/unlock", nil, nil)
+	if !sc.Scan() || !strings.Contains(sc.Text(), `"event":"unlock"`) {
 		t.Fatalf("followed line %q", sc.Text())
 	}
 }
@@ -317,7 +313,7 @@ func TestEnrolTokens(t *testing.T) {
 	}
 	var tr server.TokenResponse
 	e.adminDo("POST", "/v1/tokens", server.TokenRequest{Name: "x"}, &tr)
-	if tr.Pin != e.pin || tr.URL != e.cfg.URL || !strings.Contains(tr.Command, "tpm2-kira vault enrol --url "+e.cfg.URL+" --pin "+e.pin+" --token "+tr.Token) {
+	if tr.Pin != e.pin || tr.URL != e.cfg.URL || !strings.Contains(tr.Command, "kira vault enrol --url "+e.cfg.URL+" --pin "+e.pin+" --token "+tr.Token) {
 		t.Fatalf("token response %+v", tr)
 	}
 	ents, _ := os.ReadDir(e.dir.Path + "/tokens")
@@ -493,7 +489,20 @@ func TestRevoke(t *testing.T) {
 	if d := e.device(m); d.Failures != 0 {
 		t.Fatal("a revoked device's request counted as a failed verification")
 	}
-	e.adminDo("POST", "/v1/devices/db-03/unrevoke", nil, &v)
+	// Final: r_dev and the record are gone; a second revoke changes nothing; the way
+	// back is a new enrolment.
+	if d := e.device(m); d.RDev != nil || d.Remote != nil {
+		t.Fatalf("a revoked device keeps its key's r or its record: %+v", d)
+	}
+	if code, _ := e.adminDo("POST", "/v1/devices/db-03/revoke", nil, &v); code != 200 || !v.Revoked {
+		t.Fatalf("revoke again: %d %+v", code, v)
+	}
+	if code, _ := e.adminDo("POST", "/v1/devices/db-03/unrevoke", nil, nil); code != 404 && code != 405 {
+		t.Fatalf("unrevoke answers %d", code)
+	}
+	if _, err := m.Enrol(e.client, e.token(server.TokenRequest{Name: "db-03", Replace: hex.EncodeToString(m.DeviceID)})); err != nil {
+		t.Fatalf("enrol again: %v", err)
+	}
 	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
 
 	// Listing and showing.
@@ -612,25 +621,31 @@ func TestApproveMode(t *testing.T) {
 	}
 }
 
-// A vault whose own PCRs moved denies with advice and does not hold it
-// against the device; reseal-like resealing makes it release again.
+// A vault whose own boot state no approval covers denies with advice and does not
+// hold it against the device, enrols nothing, and releases again once approved.
 func TestVaultBootStateChanged(t *testing.T) {
 	e := newEnv(t)
 	m := e.machine(0)
-	e.sealer.ChangeBoot()
+	e.keys.ChangeBoot()
 	for i := 0; i < server.MaxFailures+1; i++ {
-		wantStatus(t, e.release(m), vaultproto.StatusDenied, "the vault's own boot state changed: run reseal")
+		wantStatus(t, e.release(m), vaultproto.StatusDenied, approval.ErrDue.Error())
 	}
 	if d := e.device(m); d.Locked || d.Failures != 0 {
 		t.Fatalf("device %+v", d)
 	}
 	found := false
 	for _, l := range e.auditLines() {
-		found = found || l.Detail == keys.ErrBootStateChanged.Error()
+		found = found || l.Detail == approval.ErrDue.Error()
 	}
 	if !found {
 		t.Fatal("the denial is not in the audit log")
 	}
+	other, _ := vaulttest.NewMachine("db-04")
+	if _, err := other.Enrol(e.client, e.token(server.TokenRequest{Name: "db-04"})); err == nil || !strings.Contains(err.Error(), "not approved") {
+		t.Fatalf("an enrolment while an approval is due: %v", err)
+	}
+	e.keys.Approve()
+	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
 }
 
 // A machine pins the vault's key: another key is a refused vault.
@@ -790,4 +805,57 @@ func (e *env) deviceView(m *vaulttest.Machine) *server.DeviceView {
 		e.t.Fatalf("device: %d %s", code, msg)
 	}
 	return &v
+}
+
+// GET /v1/status counts what the vault holds; GET /v1/tokens lists the unused tokens
+// by an ID, never their value; DELETE withdraws one, audited, and it enrols nothing.
+func TestStatusAndTokens(t *testing.T) {
+	e := newEnv(t)
+	e.machine(0)
+	e.adminDo("POST", "/v1/devices/db-03/revoke", nil, nil)
+	tok := e.token(server.TokenRequest{Name: "web-1"})
+	e.token(server.TokenRequest{Name: "old", TTLSeconds: 1})
+	e.clock.Advance(2 * time.Second)
+
+	var st server.StatusView
+	if code, msg := e.adminDo("GET", "/v1/status", nil, &st); code != 200 {
+		t.Fatalf("status: %d %s", code, msg)
+	}
+	if st.Devices != 1 || st.Revoked != 1 || st.Tokens != 2 || st.ExpiredTokens != 1 || st.URL != e.cfg.URL || st.Pin != e.pin {
+		t.Fatalf("status %+v", st)
+	}
+	var list []server.TokenView
+	if code, _ := e.adminDo("GET", "/v1/tokens", nil, &list); code != 200 || len(list) != 2 || len(list[0].ID) != 16 {
+		t.Fatalf("tokens %+v", list)
+	}
+	raw, _ := json.Marshal(list)
+	if strings.Contains(string(raw), tok) {
+		t.Fatal("a token's value is listed")
+	}
+	var web server.TokenView
+	for _, l := range list {
+		if l.Name == "web-1" {
+			web = l
+		}
+	}
+	if code, _ := e.adminDo("DELETE", "/v1/tokens/"+web.ID, nil, nil); code != 200 {
+		t.Fatalf("withdraw: %d", code)
+	}
+	if code, _ := e.adminDo("DELETE", "/v1/tokens/"+web.ID, nil, nil); code != 404 {
+		t.Fatalf("withdraw twice: %d", code)
+	}
+	if code, _ := e.adminDo("DELETE", "/v1/tokens/abc", nil, nil); code != 404 {
+		t.Fatalf("withdraw by a short ID: %d", code)
+	}
+	other, _ := vaulttest.NewMachine("web-1")
+	if _, err := other.Enrol(e.client, tok); err == nil {
+		t.Fatal("a withdrawn token enrolled")
+	}
+	found := false
+	for _, l := range e.auditLines() {
+		found = found || l.Event == "token-withdraw" && l.Name == "web-1"
+	}
+	if !found {
+		t.Fatal("the withdrawal is not in the audit log")
+	}
 }

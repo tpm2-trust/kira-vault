@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/server"
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/vaulttest"
+	"github.com/tpm2-trust/kira-vault/internal/server"
+	"github.com/tpm2-trust/kira-vault/internal/vaulttest"
 )
 
 // operatorURL starts the operator interface on its own TLS listener.

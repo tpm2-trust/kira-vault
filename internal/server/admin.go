@@ -14,10 +14,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/secretjson"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 // The admin interface's messages. The operator interface serves a part
@@ -38,7 +39,6 @@ type DeviceView struct {
 	EnrolledAt    time.Time              `json:"enrolled_at"`
 	LastRelease   *time.Time             `json:"last_release,omitempty"`
 	Selection     vaultproto.Selection   `json:"selection"`
-	VaultPCRs     []uint8                `json:"vault_pcrs"` // the vault PCRs its key is sealed to
 	// SecureBoot is what the last verified quote established; not established before
 	// the first. SecureBootRed marks every state but on.
 	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
@@ -76,9 +76,10 @@ type ModeRequest struct {
 
 // ApproveRequest is the body of POST /v1/requests/{id}/approve. Pepper is
 // required for a device enrolled with one and refused for any other: UTF-8,
-// 1 to vaultproto.MaxPepper bytes.
+// 1 to vaultproto.MaxPepper bytes. It is read as bytes, never a string
+// (secretjson), and wiped when the release has passed it on or the request is gone.
 type ApproveRequest struct {
-	Pepper *string `json:"pepper,omitempty"`
+	Pepper *secretjson.Bytes `json:"pepper,omitempty"`
 }
 
 // TokenRequest is the body of POST /v1/tokens.
@@ -108,14 +109,22 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/devices", s.adminDevices)
 	mux.HandleFunc("GET /v1/devices/{id}", s.adminDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/revoke", s.adminSetFlag("revoke", func(d *state.Device) { d.Revoked = true }))
-	mux.HandleFunc("POST /v1/devices/{id}/unrevoke", s.adminSetFlag("unrevoke", func(d *state.Device) { d.Revoked = false }))
+	// A revoke is final: r_dev goes, and with it the device's key, for good (and the
+	// record it opened). The way back is a new enrolment (token create --replace).
+	mux.HandleFunc("POST /v1/devices/{id}/revoke", s.adminSetFlag("revoke", func(d *state.Device) {
+		d.Revoked = true
+		clear(d.RDev)
+		d.RDev, d.Remote = nil, nil
+	}))
 	mux.HandleFunc("POST /v1/devices/{id}/unlock", s.adminSetFlag("unlock", func(d *state.Device) { d.Locked, d.Failures = false, 0 }))
 	mux.HandleFunc("POST /v1/devices/{id}/mode", s.adminMode)
 	mux.HandleFunc("GET /v1/requests", s.adminRequests)
 	mux.HandleFunc("POST /v1/requests/{id}/approve", s.adminDecide(approved))
 	mux.HandleFunc("POST /v1/requests/{id}/deny", s.adminDecide(denied))
 	mux.HandleFunc("POST /v1/tokens", s.adminToken)
+	mux.HandleFunc("GET /v1/tokens", s.adminTokens)
+	mux.HandleFunc("DELETE /v1/tokens/{id}", s.adminTokenWithdraw)
+	mux.HandleFunc("GET /v1/status", s.adminStatus)
 	mux.HandleFunc("GET /v1/audit", s.adminAudit)
 	mux.HandleFunc("GET /v1/operators", s.adminOperators)
 	mux.HandleFunc("POST /v1/operators", s.adminOperatorAdd)
@@ -135,7 +144,7 @@ func viewOf(d *state.Device) DeviceView {
 		SecureBoot: sb, SecureBootRed: sb.Red(), SecureBootAt: d.SecureBootAt,
 		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired, Keyboard: d.Keyboard,
 		MinGeneration: d.MinGeneration, Revoked: d.Revoked, Locked: d.Locked, Failures: d.Failures,
-		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection, VaultPCRs: d.Sealed.PCRs,
+		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection,
 	}
 }
 
@@ -305,16 +314,22 @@ func (s *Server) adminDecide(to reqState) http.HandlerFunc {
 				return
 			}
 			var a ApproveRequest
+			var perr error
 			if len(bytes.TrimSpace(body)) > 0 {
-				if err := json.Unmarshal(body, &a); err != nil {
-					s.answer(w, nil, fail(http.StatusBadRequest, "the request does not parse: %v", err))
-					return
-				}
+				perr = json.Unmarshal(body, &a)
 			}
-			clear(body)
+			clear(body) // the pepper's only other copy
+			if perr != nil {
+				if a.Pepper != nil {
+					clear(*a.Pepper)
+				}
+				s.answer(w, nil, fail(http.StatusBadRequest, "the request does not parse: %v", perr))
+				return
+			}
 			if a.Pepper != nil {
-				pepper = []byte(*a.Pepper)
+				pepper = *a.Pepper
 				if len(pepper) == 0 || len(pepper) > vaultproto.MaxPepper {
+					clear(pepper)
 					s.answer(w, nil, fail(http.StatusBadRequest, "a pepper has 1 to %d bytes", vaultproto.MaxPepper))
 					return
 				}
@@ -425,7 +440,7 @@ func (s *Server) createToken(t *TokenRequest) (*TokenResponse, error) {
 	}
 	return &TokenResponse{
 		Token: value, Name: tok.Name, Mode: tok.Mode, Expires: tok.Expires, URL: s.cfg.URL, Pin: s.pin,
-		Command: fmt.Sprintf("tpm2-kira vault enrol --url %s --pin %s --token %s --out /run/tpm2-kira/luks.key", s.cfg.URL, s.pin, value),
+		Command: fmt.Sprintf("kira vault enrol --url %s --pin %s --token %s --out /run/kira/luks.key", s.cfg.URL, s.pin, value),
 	}, nil
 }
 

@@ -27,9 +27,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 const (
@@ -51,7 +51,7 @@ func Write(d state.Dir, host string, now time.Time) error {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "tpm2-kira-vault root, " + host},
+		Subject:               pkix.Name{CommonName: "kira-vault root, " + host},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.AddDate(rootValidity, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -212,6 +212,9 @@ func (c *Certs) Pin() string { return vaultproto.PinOf(c.root.RawSubjectPublicKe
 func (c *Certs) RootPEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.root.Raw})
 }
+
+// Root is the root's certificate.
+func (c *Certs) Root() *x509.Certificate { return c.root }
 
 // Leaf is the leaf served now.
 func (c *Certs) Leaf() *x509.Certificate {

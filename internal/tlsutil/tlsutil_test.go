@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
 func serveCerts(t *testing.T, c *Certs) string {

@@ -1,9 +1,9 @@
 [Unit]
-Description=tpm2-kira vault: releases the remote parts of tpm+vault keyslots
-Documentation=https://github.com/tpm2-trust/tpm2-kira-vault
+Description=kira vault: releases the remote parts of tpm+vault keyslots
+Documentation=https://github.com/tpm2-trust/kira-vault
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/var/lib/tpm2-kira-vault/config.json
+ConditionPathExists=/var/lib/kira-vault/config.json
 
 [Service]
 Type=simple
@@ -13,17 +13,20 @@ Type=simple
 # Debian (0660 both).
 User=root
 SupplementaryGroups=tss
-ExecStart=/usr/bin/tpm2-kira-vault serve --dir /var/lib/tpm2-kira-vault
+ExecStart=/usr/bin/kira-vault serve --dir /var/lib/kira-vault
 Restart=on-failure
 RestartSec=2s
 
-StateDirectory=tpm2-kira-vault
+StateDirectory=kira-vault
 StateDirectoryMode=0700
-RuntimeDirectory=tpm2-kira-vault
+RuntimeDirectory=kira-vault
 RuntimeDirectoryMode=0700
 UMask=0077
 # No core dump may hold a device key.
 LimitCORE=0
+# serve locks its memory (mlockall) before it holds a key, and refuses to run
+# without the lock: no capability for it, so no limit on it.
+LimitMEMLOCK=infinity
 
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=

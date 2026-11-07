@@ -1,0 +1,46 @@
+# kira-vault in a container, started by systemd (a Quadlet): podman, as root.
+# make install-container writes it to /etc/containers/systemd/ with the host's tss
+# group filled in; then: systemctl daemon-reload && systemctl start kira-vault.
+#
+# The vault is made in the same container first, with serve's stopped:
+#   podman run --rm -it --device /dev/tpmrm0 --userns auto:gidmapping=5000:@TSS_GID@:1 \
+#     --group-add 5000 --ulimit memlock=-1:-1 -v /var/lib/kira-vault:/var/lib/kira-vault:Z \
+#     -v /run/kira-vault:/run/kira-vault:Z localhost/kira-vault:latest init
+# and an approval runs in serve's: podman exec -it kira-vault /kira-vault approve
+
+[Unit]
+Description=kira vault (container): releases the remote parts of tpm+vault keyslots
+Documentation=https://github.com/tpm2-trust/kira-vault
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/kira-vault:latest
+ContainerName=kira-vault
+# The TPM, and nothing else of the host's: its group (tss, gid @TSS_GID@ here)
+# mapped into the container's user namespace as 5000, which the vault's process has.
+AddDevice=/dev/tpmrm0
+UserNS=auto:gidmapping=5000:@TSS_GID@:1
+GroupAdd=5000
+ReadOnly=true
+DropCapability=all
+NoNewPrivileges=true
+# It locks itself in memory before it holds a key; no core dump may hold one.
+Ulimit=memlock=-1:-1
+Ulimit=core=0
+Volume=/var/lib/kira-vault:/var/lib/kira-vault:Z
+Volume=/run/kira-vault:/run/kira-vault:Z
+# Read-only, for an approval's checks of PCR 7 and PCR 15.
+Volume=/sys/kernel/security:/sys/kernel/security:ro
+Volume=/run/log/systemd:/run/log/systemd:ro
+PublishPort=8443:8443
+# The operator interface, where it is on: on the management address alone.
+#PublishPort=MGMT-ADDR:8444:8444
+
+[Service]
+Restart=on-failure
+RestartSec=2s
+ExecStartPre=/usr/bin/mkdir -p -m 0700 /var/lib/kira-vault /run/kira-vault
+
+[Install]
+WantedBy=multi-user.target

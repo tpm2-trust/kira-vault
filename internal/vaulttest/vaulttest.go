@@ -1,6 +1,6 @@
 // Package vaulttest simulates a machine for the vault's tests: a TPM double
 // (attesttest.SoftTPM), a signing key that approved its PCRs at a
-// generation, and an HTTP client that pins the vault's key, as tpm2-kira
+// generation, and an HTTP client that pins the vault's key, as kira
 // does.
 package vaulttest
 
@@ -19,11 +19,11 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 
-	"github.com/tpm2-trust/tpm2-kira/core/attest"
-	"github.com/tpm2-trust/tpm2-kira/core/attest/attesttest"
-	"github.com/tpm2-trust/tpm2-kira/core/vaultproto"
+	"github.com/tpm2-trust/kira/core/attest"
+	"github.com/tpm2-trust/kira/core/attest/attesttest"
+	"github.com/tpm2-trust/kira/core/vaultproto"
 
-	"github.com/tpm2-trust/tpm2-kira-vault/internal/tlsutil"
+	"github.com/tpm2-trust/kira-vault/internal/tlsutil"
 )
 
 // Machine is a simulated machine with one tpm+vault keyslot.
@@ -145,7 +145,7 @@ type Client struct {
 	HTTP *http.Client
 }
 
-// NewClient pins the vault's key as tpm2-kira does.
+// NewClient pins the vault's key as kira does.
 // NewClient verifies the vault's chain against root (PEM) and then the
 // pin, as a machine does.
 func NewClient(url string, root []byte, pin string) *Client {
