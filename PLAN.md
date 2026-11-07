@@ -111,7 +111,7 @@ container. Tests still need temporary sockets and swtpm:
   so that systemd starts it):
   `--name tpm2-kira-vault --device /dev/tpmrm0 --group-add <tss gid> --read-only
   --cap-drop ALL --security-opt no-new-privileges --userns auto (docker:
-  userns-remap) --ulimit memlock=<n> --ulimit core=0 -v
+  userns-remap) --ulimit memlock=-1:-1 --ulimit core=0 -v
   /var/lib/tpm2-kira-vault:/var/lib/tpm2-kira-vault:Z -v
   /run/tpm2-kira-vault:/run/tpm2-kira-vault:Z -p 8443:8443 [-p
   MGMT-ADDR:8444:8444]`, and read-only for the approval's checks: `-v
@@ -281,7 +281,7 @@ Each committable and testable alone. **A3 and A4 touch tpm2-kira and wait until
 the other session's change there (the sweep in `internal/admin/slot_admin.go`
 and control) is merged**; A1, A2 and the B steps do not wait.
 
-- [ ] **A1** New repository `go-tui-slim` (workspace checkout `go-tui-slim/`):
+- [x] **A1** (go-tui-slim 134f1f1) New repository `go-tui-slim` (workspace checkout `go-tui-slim/`):
   `tui`, `prompt`, `termguard` taken over from tpm2-kira with their tests (they
   leave tpm2-kira in A3); `secret` (Wipe, LockedBuffer, LockProcess, with tests);
   prompt's `SecretBuffer`/`MaxSecret` instead of diskkey. `go test ./...`.
@@ -307,7 +307,7 @@ and control) is merged**; A1, A2 and the B steps do not wait.
 - [ ] **B2** Memory and reach: the vault requires go-tui-slim and go-uefi-slim
   (submodules, `replace`); `secret.LockProcess()` in serve and in every command
   holding a secret; secrets read into locked byte buffers, not strings;
-  `LimitMEMLOCK=` in the unit. `init` refuses an unreachable
+  `LimitMEMLOCK=infinity` in the unit (`LockProcess` refuses a finite limit without `CAP_IPC_LOCK`, which the unit does not give). `init` refuses an unreachable
   `--tpm`/`--admin-socket` (the test hook, the `vault_test_swtpm` tag, the
   release check in `make build`); tpm2-kira's `tools/vmtestlib.py` builds the
   vault with the tag. Tests.
@@ -389,7 +389,7 @@ the end of the batch.
   test build takes a socket TPM. tpm2-kira's vmtest builds the vault with that
   tag (B2, in the same batch).
 - **Memory locking:** serve and the secret-holding commands stop if they cannot
-  lock: the unit gets `LimitMEMLOCK=`, the container line `--ulimit memlock`.
+  lock: the unit gets `LimitMEMLOCK=infinity`, the container line `--ulimit memlock=-1:-1`.
 - tpm2-kira and the vault need the new submodules to build
   (`--recurse-submodules`; AUR `_tuislim`). tpm2-kira's control looks and
   behaves the same.
