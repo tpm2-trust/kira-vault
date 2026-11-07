@@ -145,11 +145,15 @@ recovery key, and `reseal`.
   backup**, the vault's only recovery secret. It imports the master into the
   vault's TPM and wipes it.
 - The import: TPM2_Import under the storage primary, as a keyedHash HMAC-SHA256
-  object, with `sign` set and `userWithAuth` clear. No outer wrapper; the
-  duplicate travels parameter-encrypted in a salted session bound to the
-  primary. The imported object is not fixedTPM: the master existed once, at
-  init, and after that only in the backup. Its public and private blobs go
-  into `master.json`.
+  object, with `sign` set and `userWithAuth` clear. The duplicate has an outer
+  wrapper for the primary's public key (go-tpm's `CreateDuplicate`: its seed
+  encapsulated to that key, the sensitive area encrypted and integrity-protected
+  for it), so it is not on the bus in the clear - parameter encryption alone would
+  not do: it covers a command's first parameter, and Import's is the inner
+  wrapper's key, not the duplicate. The imported object is not fixedTPM: the master
+  existed once, at init, and after that only in the backup. Its obfuscation value
+  is derived from the master (HKDF), so the public area follows from the backup
+  alone. Its public and private blobs go into `master.json`.
 - Each machine's key is derived in the TPM: `K_dev = TPM2_HMAC(master, device ID
   ‖ r_dev)`, with `r_dev` 32 random bytes per device, kept in its record.
   K_dev only ever lives in locked memory, and it is wiped after each release or
@@ -311,7 +315,14 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   `--tpm`/`--admin-socket` (the test hook, the `vault_test_swtpm` tag, the
   release check in `make build`); kira's `tools/vmtestlib.py` builds the
   vault with the tag. Tests.
-- [ ] **B3** `internal/keys`: the master (`Import`: keyedHash HMAC, no outer
+- [x] **B3** (`keys/master.go`, `backup.go`, `vaulttpm.go`; swtpm: the TPM's HMAC is
+  the master's, a wrong PIN, a moved PCR, an older and a forged approval refused,
+  two keys under PolicyOR; the digests pinned) The counter's policy, like the master's,
+  is the PolicyOR of every approval key's branch (PolicySigned ; PolicyCommandCode
+  (NV_Increment)), so that a second key raises it too; adding a key makes the master
+  (from the backup) and the counter again. The backup is base32 of the master and two
+  check bytes (a typo is caught where it is typed), 11 groups of five. `keys.RecoveryKey`
+  and the sealer go in B5, with their last user. `internal/keys`: the master (`Import`: keyedHash HMAC, no outer
   wrapper, parameter-encrypted salted session; `Derive(id, r)`: TPM2_HMAC in a
   policy session flushed on every way out), the approval key (`CreateApprovalKey`
   with a PIN, DA-protected, RSA by `TPM2_TestParms`), the policy digests (core's
