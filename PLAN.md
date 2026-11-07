@@ -1,7 +1,9 @@
 # PLAN: `tpm2-kira-vault control`
 
-Status: **confirmed by the owner (2026-11-07)**, except open question 1 (the seal
-check). No code before the word to start.
+Status: **confirmed by the owner (2026-11-07)**, the vault's keys and their
+approval included (decided 2026-11-07). Open: the two points under "Open
+questions", which came up while writing the key design down. Step A1 is started;
+nothing else before the word to start.
 
 ## Goal
 
@@ -10,7 +12,7 @@ one full screen (sections, steps marked done/open/blocked/dirty, the detail, the
 command each step equals, search), line menus with `--lines`, a plain printout
 without a terminal. It takes a person from an empty host to a serving vault with
 machines enrolled - under the systemd unit or in a container - and then runs the
-day-to-day work: the queue, devices, operators, reseal. Everything it does stays
+day-to-day work: the queue, devices, operators, approvals of a new boot state. Everything it does stays
 doable by hand.
 
 ## What setting up a vault takes today (and where it goes wrong)
@@ -112,12 +114,15 @@ container. Tests still need temporary sockets and swtpm:
   userns-remap) --ulimit memlock=<n> --ulimit core=0 -v
   /var/lib/tpm2-kira-vault:/var/lib/tpm2-kira-vault:Z -v
   /run/tpm2-kira-vault:/run/tpm2-kira-vault:Z -p 8443:8443 [-p
-  MGMT-ADDR:8444:8444]`. Only the TPM device, no other device; no
-  capability (ports above 1024).
-- `init`, `reseal`, `config` run in the container too (`podman run --rm -it`
-  with the same device and volumes, serve's container stopped), so the files
-  belong to the container's mapped uid; the panel runs and shows exactly that
-  command.
+  MGMT-ADDR:8444:8444]`, and read-only for the approval's checks: `-v
+  /sys/kernel/security:/sys/kernel/security:ro` (the firmware's event log) and
+  `-v /run/log/systemd/tpm2-measure.log:/run/log/systemd/tpm2-measure.log:ro`.
+  Only the TPM device, no other device; no capability (ports above 1024).
+- `init` and `config` run in the container too (`podman run --rm -it` with the
+  same device and volumes, serve's container stopped), so the files belong to
+  the container's mapped uid; `approve` runs in serve's container (`podman exec
+  -it tpm2-kira-vault tpm2-kira-vault approve`) while serve runs. The panel runs
+  and shows exactly those commands.
 - control runs on the host: the admin socket is on the volume; the host's root
   reaches it. Its owner check accepts the container's mapped uid.
 
@@ -129,6 +134,105 @@ a user namespace other than the panel's (`/proc/PID/ns/user`) → in a container
 else → "serve runs, neither under the unit nor in a container": said, nothing
 offered to stop or start it. serve not running: the unit or the Quadlet is
 looked for; if neither is installed, the Setup section offers both ways.
+
+## Decided: the vault's keys - one master, imported; approvals signed in its TPM
+
+Replaces today's per-device `K_dev` sealed to the vault's PCRs, its copy to the
+recovery key, and `reseal`.
+
+**The master key.**
+
+- `init` draws one 32-byte master in locked memory and shows it once as **the
+  backup**, the vault's only recovery secret. It imports the master into the
+  vault's TPM and wipes it.
+- The import: TPM2_Import under the storage primary, as a keyedHash HMAC-SHA256
+  object, with `sign` set and `userWithAuth` clear. No outer wrapper; the
+  duplicate travels parameter-encrypted in a salted session bound to the
+  primary. The imported object is not fixedTPM: the master existed once, at
+  init, and after that only in the backup. Its public and private blobs go
+  into `master.json`.
+- Each machine's key is derived in the TPM: `K_dev = TPM2_HMAC(master, device ID
+  ‖ r_dev)`, with `r_dev` 32 random bytes per device, kept in its record.
+  K_dev only ever lives in locked memory, and it is wiped after each release or
+  enrolment. The machine's wrapped R stays encrypted under K_dev (AES-256-GCM,
+  the device ID as AAD), as now.
+- **Revoke** deletes `r_dev`: the device's key cannot be made again, by anyone,
+  with or without the backup. `device unrevoke` goes; the way back is a new
+  enrolment (`--replace`).
+- **Restore:** `init --restore` imports the backup into a new TPM. It needs the
+  state directory too (the `r_dev` values and the records), restored from a
+  backup of it.
+- **Backup check:** `backup check` asks for the backup and rebuilds the public
+  area's `unique` (H(seed ‖ key)). It compares that with `master.json`'s public
+  area. No check value of the master is stored anywhere.
+
+**The master's policy** (an AND, as in tpm2-kira's slots):
+
+    authPolicy = PolicyAuthorize(approval key, policyRef) ; PolicyCommandCode(TPM2_HMAC)
+
+- The approved part is `PolicyPCR(selection, values)`. The approval key signs
+  its digest (`aHash = H(approvedPolicy ‖ policyRef)`), and the session runs
+  PolicyPCR → PolicyAuthorize(ticket) → PolicyCommandCode.
+- With a YubiKey as the second approval key, the master's authPolicy is
+  `PolicyOR(branch TPM key, branch YubiKey)`. Each branch is that same AND
+  with its own key.
+- The digests are computed with core's `attest.PolicyDigest`/`PolicyStep`.
+  Core keeps its `policyAuthorize` step unexported, so the vault uses go-tpm's
+  `tpm2.PolicyAuthorize{…}.Update` directly until core exports it (a core
+  change, with `./pin tpm2-kira`). Sessions are explicit and flushed on every
+  way out, as in tpm2-kira.
+
+**The approval key.**
+
+- It lives in the vault's own TPM, under the storage primary, as an unrestricted
+  signing key. Its authValue is a PIN, asked twice at init, and it is
+  dictionary-attack protected (noDA clear).
+- Its algorithm is RSA at the greatest length the TPM accepts (`TPM2_TestParms`;
+  swtpm 3072, many TPMs 2048), by the workspace's key rule.
+- The optional YubiKey key is PIV RSA 2048, or longer where the token takes it.
+- **An approval** (`approve`, and the first one at init): the operator enters the
+  PIN, the TPM signs the policy over the live values of the selection, and the
+  signature, the values, the time and who signed (TPM key or YubiKey) go into
+  `approvals/<time>.json`. The panel lists them.
+- serve takes the approval whose values match the live PCRs.
+- **The approval refuses:**
+  - **PCR 7** whose event log says Secure Boot is off or in Setup Mode (core's
+    `attest.EstablishSecureBoot`, over `/sys/kernel/security/tpm0/binary_bios_measurements`).
+  - **PCR 15** that does not hold the measurement of the encrypted volume the
+    state directory is on. The check:
+    1. Replay systemd's measurement log (`/run/log/systemd/tpm2-measure.log`).
+    2. Compare the replay with the live PCR 15.
+    3. Find the state directory's volume: `stat` → `/sys/dev/block/M:m` →
+       its dm-crypt holder, whose `dm/uuid` and `dm/name` give the LUKS UUID.
+    4. Require the `cryptsetup:<name>:<uuid>` event in the log. It is written
+       by systemd-cryptsetup with `tpm2-measure-pcr=yes` (crypttab), and the
+       panel advises that line, never edits it.
+- **Default selection `7,15`.** Approvals are then due only on a db/dbx update or
+  a re-encryption, not on kernel updates. 11 and 4 are optional.
+
+**With tpm2-kira installed on the vault host:**
+
+- tpm2-kira's close extends PCR 15 with a fixed event before any volume opens,
+  and logs it into the same log. PCR 15 is then deterministic for the host.
+- tpm2-kira's slots need PCR 15 zero before the close, and the vault reads it
+  after: no conflict.
+
+**Limits, written down in the docs and said by the panel:**
+
+- **Debian's initramfs-tools `cryptroot` measures nothing.** The vault says so,
+  and falls back to a start check: serve refuses unless the state directory is
+  on dm-crypt. The PCR 15 refusal then only replays what is there.
+- **tpm2-kira's close falling back to killing the hierarchies** leaves the vault
+  without a TPM in that boot. serve refuses to serve, and says why.
+
+**"Approval due"** needs no unseal and no canary. The panel compares the live
+PCRs with the approved values, and a trial policy session's digest after
+PolicyPCR with the approved policies.
+
+**What goes:** `reseal`, the recovery key, `recovery check`, `device unrevoke`,
+`keys.RecoveryKey` and its per-device copies, `Device.Sealed` and
+`Device.Recovery`.
+
 
 ## The panel
 
@@ -143,47 +247,48 @@ The panel never opens the TPM itself (serve has it) and never calls
 
 | Section | Lines (judged: green / orange / red with the risk) and steps | Equals |
 |---|---|---|
-| Overview | root; deployment (unit / container / neither); state dir 0700; TPM reachable, manufacturer (from serve); the vault host's Secure Boot (off or Setup Mode red: "PCR 7 says nothing of this host's boot"); PCRs (empty red); seal check (red: "reseal due"; see question 1); URL host = leaf's name, resolves, a local address (orange when not: NAT); leaf and root validity; machines' port answers, verified; operator port on/off, on all addresses (orange); admin socket 0600, its owner, answers; devices: count, any locked/revoked/Secure Boot not on; unused and expired tokens; pending requests (the recommended step) | `systemctl status` / `podman ps`, `status`, `devices`, `requests` |
-| Setup | **Create the vault** (guided init: URL proposed from hostname and addresses, its cert-name consequence said; listen; PCRs with the reseal consequence; operator interface yes/no; in a container: the `podman run --rm` form); **check the recovery key**; **run it**: the unit (`enable --now`) or the container (the Quadlet, or the run line); firewall advice for 8443/8444, never edited | `init …`; `recovery check`; `systemctl enable --now tpm2-kira-vault[-container]` |
-| Machines | **Enrol a machine** (name, mode, ttl, replace: token create; the token once, URL, pin, the line for `tpm2-kira control`'s vault step and `luks enrol`; offers to write the root to a file); **unused tokens** (each a line: withdraw ⚠); **each device** a line: show, mode, unlock, revoke/unrevoke | `token create …`; `token withdraw ID`; `device …` |
+| Overview | root; deployment (unit / container / neither); state dir 0700, on an encrypted volume, measured into PCR 15 (red when not: the crypttab line advised); TPM reachable, manufacturer (from serve); the vault host's Secure Boot (off or Setup Mode red); the selection (without 7 or 15 orange, with the reason); **approval due** (red: "the boot state changed: approve it"; from the live PCRs against the approvals, no unseal); the approval keys (TPM, YubiKey) and the TPM's dictionary-attack state (in lockout red); URL host = leaf's name, resolves, a local address (orange when not: NAT); leaf and root validity; machines' port answers, verified; operator port on/off, on all addresses (orange); admin socket 0600, its owner, answers; devices: count, any locked/revoked/Secure Boot not on; unused and expired tokens; pending requests (the recommended step) | `systemctl status` / `podman ps`, `status`, `devices`, `requests` |
+| Setup | **Create the vault** (guided init: URL proposed from hostname and addresses, its cert-name consequence said; listen; selection `7,15` with what each costs; the approval PIN twice; operator interface yes/no; in a container: the `podman run --rm` form; the backup shown once); **restore** from a backup into this TPM; **check the backup**; **a YubiKey as second approval key**; **run it**: the unit (`enable --now`) or the container (the Quadlet, or the run line); firewall advice for 8443/8444, never edited | `init …`; `init --restore`; `backup check`; `approval-key add --yubikey`; `systemctl enable --now tpm2-kira-vault[-container]` |
+| Machines | **Enrol a machine** (name, mode, ttl, replace: token create; the token once, URL, pin, the line for `tpm2-kira control`'s vault step and `luks enrol`; offers to write the root to a file); **unused tokens** (each a line: withdraw ⚠); **each device** a line: show, mode, unlock, revoke ⚠ | `token create …`; `token withdraw ID`; `device …` |
 | Requests | each pending request a line: approve (pepper asked where needed) / deny; a released keyboard request: **show its layout** (on Enter only, never in the detail pane) | `request approve|deny ID` |
 | Operators | interface on/off (stops and starts serve, asked); add (token once); each operator a line: remove ⚠ (typed name) | `config set operator-listen`; `operator add|remove` |
-| Maintenance | **Reseal** (stops serve, asks the recovery key, starts it); show root and pin | `systemctl stop …; reseal; systemctl start …` (or the container's); `tls root` |
-| Tools | `status`, `devices`, `requests`, `operators`, `audit`, `audit --follow`, `tls root`, `token list` run as they are | the same |
+| Approvals | **Approve this boot state** (shows old and new values and what moved them - PCR 7's events, PCR 15's - the refusals' verdicts, then the PIN or the YubiKey); **every approval** a line: values, when, by which key; show root and pin | `approve [--yubikey]`; `approvals`; `tls root` |
+| Tools | `status`, `devices`, `requests`, `operators`, `approvals`, `audit`, `audit --follow`, `tls root`, `token list` run as they are | the same |
 | Reference | `help` | `help` |
 
 Danger: view / change / destroy as in tpm2-kira. Destroying (typed word):
-operator remove (its name), token withdraw (`withdraw`). Revoke is a change
-(reversible), asked y/N. A new vault over an existing one is not offered
-(`rm -r` of the state directory by hand, with what it costs said in Reference).
+device revoke (the device's name: its key is gone for good), operator remove
+(its name), token withdraw (`withdraw`). A new vault over an existing one is not
+offered (`rm -r` of the state directory by hand, with what it costs said in
+Reference).
 
-**Secrets: what the panel never shows or logs.** The recovery key, enrolment
-tokens and operator tokens are printed once, in the step's run below the
-screen, never in a frame, the detail pane or `--debug`; after the step the
-screen and scrollback are cleared (`\033[3J`). After init the panel asks for
-the recovery key's last group back before going on. Peppers are read with
-`prompt.Password` into a locked buffer, the approve body is built into a locked
-buffer by hand (no `encoding/json` string copy), sent over the admin socket and
-wiped; never echoed, logged or kept. A keyboard layout is shown only on request.
-`--debug` logs method and path of admin calls, never bodies or answers. The
-panel talks to serve only through the admin socket, as the CLI. Every command
-that holds a secret, the panel and serve call `secret.LockProcess()` first.
+**Secrets: what the panel never shows or logs.** The backup, enrolment tokens
+and operator tokens are printed once, in the step's run below the screen, never
+in a frame, the detail pane or `--debug`; after the step the screen and
+scrollback are cleared (`\033[3J`). After init the panel asks for the backup's
+last group back before going on. The backup, the approval PIN, the YubiKey's
+PIN and peppers are read with `prompt.Password` into locked buffers, used and
+wiped; never echoed, logged or kept. The pepper's approve body is built into a
+locked buffer by hand (no `encoding/json` string copy) and sent over the admin
+socket. A keyboard layout is shown only on request. `--debug` logs method and
+path of admin calls, never bodies or answers. The panel talks to serve only
+through the admin socket, as the CLI. Every command that holds a secret, the
+panel and serve call `secret.LockProcess()` first.
 
 ## Steps
 
 Each committable and testable alone. **A3 and A4 touch tpm2-kira and wait until
 the other session's change there (the sweep in `internal/admin/slot_admin.go`
-and control) is merged**; A1, A2 and B1-B5 do not wait.
+and control) is merged**; A1, A2 and the B steps do not wait.
 
 - [ ] **A1** New repository `go-tui-slim` (workspace checkout `go-tui-slim/`):
   `tui`, `prompt`, `termguard` taken over from tpm2-kira with their tests (they
   leave tpm2-kira in A3); `secret` (Wipe, LockedBuffer, LockProcess, with tests);
   prompt's `SecretBuffer`/`MaxSecret` instead of diskkey. `go test ./...`.
-- [ ] **A2** **The owner first creates github.com/tpm2-trust/go-tui-slim** (the
-  submodules' URL; a pin resolves for others only once its commit is pushed).
-  Then the workspace: go.work, `pin` (SUBMODULES for go-tui-slim and the vault's
-  go-uefi-slim, the case, usage, status loop, AUR_PINS), AGENTS.md rows,
-  `test-affected.py`.
+- [ ] **A2** **The owner first creates github.com/tpm2-trust/go-tui-slim** (done,
+  2026-11-07). Then the workspace: go.work, `pin` (SUBMODULES for go-tui-slim and
+  the vault's go-uefi-slim, the case, usage, status loop, AUR_PINS), AGENTS.md
+  rows, `test-affected.py`.
 - [ ] **A3** (after the merge) tpm2-kira: submodule `go-tui-slim/`, `replace`,
   imports switched; `internal/tui`, `internal/prompt`, `internal/termguard`,
   `internal/wipe` removed, every `wipe.Bytes` → `secret.Wipe`;
@@ -199,47 +304,66 @@ and control) is merged**; A1, A2 and B1-B5 do not wait.
 - [ ] **B1** Vault refactor: `adminClient` → `internal/adminclient`; renderers
   (`printDevice`, `printLayout`, `secureBootLine`, `formatEntry`) →
   `internal/view`. No behaviour change; `make test`.
-- [ ] **B2** Admin endpoints (admin socket only): `GET /v1/status` (version,
-  URL, listen, operator listen, pin, PCRs, TPM path, manufacturer read at start,
-  leaf/root NotAfter, counts, started at, the seal check of question 1);
-  `GET /v1/tokens` (name, mode, expires, replace, ID = first 16 hex of the hash;
-  no value exists to show); `DELETE /v1/tokens/{id}`, audited. CLI: `status`,
-  `token list`, `token withdraw ID`. Server tests.
-- [ ] **B3** `recovery check [--dir]`: asks the key, compares its public half
-  with config's (constant time), touches nothing; works while serve runs. Test.
-- [ ] **B4** Memory and reach: the vault requires go-tui-slim (submodule) and
-  calls `secret.LockProcess()` in serve and in every command holding a secret
-  (`init`, `reseal`, `recovery check`, `request approve`, `requests answer`,
-  `control`); the CLI reads the recovery key and peppers into locked byte
-  buffers, not strings; `LimitMEMLOCK=` in the unit. `init` refuses an
-  unreachable `--tpm`/`--admin-socket` (the test hook and the
-  `vault_test_swtpm` tag above, the release check in `make build`); tpm2-kira's
-  `tools/vmtestlib.py` builds the vault with the tag. Tests.
-- [ ] **B5** The container: `packaging/Containerfile`, the Quadlet
+- [ ] **B2** Memory and reach: the vault requires go-tui-slim and go-uefi-slim
+  (submodules, `replace`); `secret.LockProcess()` in serve and in every command
+  holding a secret; secrets read into locked byte buffers, not strings;
+  `LimitMEMLOCK=` in the unit. `init` refuses an unreachable
+  `--tpm`/`--admin-socket` (the test hook, the `vault_test_swtpm` tag, the
+  release check in `make build`); tpm2-kira's `tools/vmtestlib.py` builds the
+  vault with the tag. Tests.
+- [ ] **B3** `internal/keys`: the master (`Import`: keyedHash HMAC, no outer
+  wrapper, parameter-encrypted salted session; `Derive(id, r)`: TPM2_HMAC in a
+  policy session flushed on every way out), the approval key (`CreateApprovalKey`
+  with a PIN, DA-protected, RSA by `TPM2_TestParms`), the policy digests (core's
+  `PolicyDigest`; PolicyOR for a second key), `ApprovalSign`/`approvals/` files,
+  `backup check`'s public-area rebuild. `keys.RecoveryKey` and the sealer go.
+  Tests against swtpm (`-tags integration`), known answers for the digests.
+- [ ] **B4** The approval's evidence (`internal/bootstate`): PCR 7 through
+  `attest.EstablishSecureBoot` over the firmware's event log; PCR 15 by replaying
+  systemd's measurement log, the state directory's volume found through `/sys`
+  and its `cryptsetup:` event; the dm-crypt start check where nothing is
+  measured. Unit tests on fixture logs and a fixture `/sys` tree.
+- [ ] **B5** The vault on the master: `init` (draws, shows the backup, the PIN,
+  imports, the approval key, the first approval), `init --restore`, `approve
+  [--yubikey]`, `approvals`, `backup check`, `approval-key add --yubikey`;
+  enrolment stores `r_dev`, a release derives `K_dev`; `device revoke` deletes
+  `r_dev`, `device unrevoke` and `reseal` go; serve refuses without an approval of
+  the live state (says so) and without a TPM. State files: `master.json`,
+  `approvals/`, the device record without `Sealed`/`Recovery`. Server tests;
+  `TestVaultOnSWTPM` across an approval (PCR extended in swtpm, release refused,
+  approved, released).
+- [ ] **B6** Admin endpoints (admin socket only): `GET /v1/status` (version,
+  URL, listen, operator listen, pin, selection, approval due and the values that
+  differ, the approval keys, TPM path, manufacturer, DA state, leaf/root NotAfter,
+  counts, started at); `GET /v1/tokens` (name, mode, expires, replace, ID = first
+  16 hex of the hash); `DELETE /v1/tokens/{id}`, audited. CLI: `status`, `token
+  list`, `token withdraw ID`. Server tests.
+- [ ] **B7** The container: `packaging/Containerfile`, the Quadlet
   `packaging/tpm2-kira-vault.container`, `make container`. Test: build it, run it
   against a TPM device where one is available (swtpm `cuse` or the vTPM proxy),
   else skipped with the reason; vmtest's vault container may move onto it later.
 - [ ] **C1** `internal/control`: facts (`facts.go`: fast/slow, deployment
-  detection, the host's Secure Boot via go-uefi-slim, the judged lines), model
-  (`model.go`: sections, steps, states, commands, danger), line mode and the
-  printout without a terminal. Unit tests on fixture facts: every step's state
-  and command, every red line's condition, each deployment.
+  detection, the host's Secure Boot via go-uefi-slim, approval due, the judged
+  lines), model (`model.go`: sections, steps, states, commands, danger), line
+  mode and the printout without a terminal. Unit tests on fixture facts: every
+  step's state and command, every red line's condition, each deployment.
 - [ ] **C2** Full screen on `panel`; `control` in main.go and the usage; the pty
   test (tpm2-kira's `control_screen_test.go` pattern: `unix.Openpt`, keys in,
   frame out, terminal restored on q/Ctrl-C).
-- [ ] **C3** Guided actions: init, run it (unit/container), enrol a machine,
-  tokens, devices, requests with pepper, operators with serve stopped and
-  started, reseal, recovery check. Tests against a fake admin socket
+- [ ] **C3** Guided actions: init and restore, run it (unit/container), enrol a
+  machine, tokens, devices, requests with pepper, operators with serve stopped
+  and started, approve, backup check. Tests against a fake admin socket
   (`httptest` on a Unix socket) and the line mode fed through a pipe.
 - [ ] **C4** Integration (`-tags integration`, swtpm): `TestControlOnSWTPM`:
   `control --lines` creates the vault, serve in-process (`serve(ctx, d, …,
-  ready)`), enrol token, operator add, the overview green except the TPM line
-  where it must be, recovery check.
+  ready)`), enrol token, operator add, a PCR extended → "approval due" → approve
+  → green; the overview green except the TPM line where it must be.
 - [ ] **C5** tpm2-kira `tools/vmtest.py`: one check in the vault scenarios -
   `tpm2-kira-vault control` without a terminal after the enrolment: the device
   listed, Secure Boot on, the deployment "in a container". Docs: tpm2-kira
-  `docs/VAULT.md` §3 leads with control and the container, §6.6 the new
-  commands; this README's "In short".
+  `docs/VAULT.md` (§2 keys, §3 setup with control and the container, §6.2 keys
+  at rest, §6.5 recovery: backup and restore, approvals; §6.6 commands); this
+  README's "In short".
 
 Testing per the workspace table: A the module's tests, tpm2-kira's
 `make test-all` and the vault's tests after `./pin go-tui-slim`; B/C the
@@ -248,23 +372,29 @@ the end of the batch.
 
 ## What breaks
 
+- **Every vault is set up again (`init`) and every machine enrolled with it
+  again** (B5): the device records, `reseal` and the recovery key go; a state
+  directory of today is refused with "make the vault again with init". The
+  owner: a new `init` on each vault host (write down the backup, choose the
+  approval PIN), then on each machine a new token and `tpm2-kira luks enrol …
+  --salt vault` (or control's vault step), the old vault keyslot removed.
+- **Revoke is final:** `device unrevoke` is gone; a revoked machine comes back
+  only by a new enrolment.
+- **The vault host:** the state directory belongs on an encrypted volume
+  measured into PCR 15 (`tpm2-measure-pcr=yes` in crypttab); otherwise the
+  approval refuses PCR 15 (or, on Debian's initramfs-tools, serve checks only
+  for dm-crypt).
 - **`init` refuses** a `--tpm` other than the hardware device and an
-  `--admin-socket` outside `/run/tpm2-kira-vault/`: a vault set up with a swtpm
-  socket or another socket path keeps serving but cannot be made again that
-  way; only a `vault_test_swtpm` test build takes a socket TPM. tpm2-kira's
-  vmtest builds the vault with that tag (B4, in the same batch).
+  `--admin-socket` outside `/run/tpm2-kira-vault/`; only a `vault_test_swtpm`
+  test build takes a socket TPM. tpm2-kira's vmtest builds the vault with that
+  tag (B2, in the same batch).
 - **Memory locking:** serve and the secret-holding commands stop if they cannot
-  lock (no `LimitMEMLOCK`, a container without `--ulimit memlock`): the unit
-  gets `LimitMEMLOCK=`, the container line `--ulimit`.
-- Otherwise nothing for a running vault: no `init` again, the admin API only
-  grows, the operator interface is unchanged. With the canary (question 1, b) an
-  existing vault shows "seal check unknown - reseal to know" until its next
-  reseal.
+  lock: the unit gets `LimitMEMLOCK=`, the container line `--ulimit memlock`.
 - tpm2-kira and the vault need the new submodules to build
   (`--recurse-submodules`; AUR `_tuislim`). tpm2-kira's control looks and
   behaves the same.
 
-## WARNING (existing code, fixed by B4)
+## WARNING (existing code, fixed by B2 and B5)
 
 - The vault's CLI holds the **recovery key** (`readSecret`) and **peppers**
   (`asker`, `ApproveRequest.Pepper *string`) as Go strings: unlocked, not
@@ -274,17 +404,20 @@ the end of the batch.
   contradict `init --tpm`/`--admin-socket` other than the defaults, and
   `ConditionPathExists` hides a start before init.
 
-## Open question (with the owner)
+## Open questions
 
-1. **The seal check** - does the vault's TPM still unseal under its PCRs, i.e.
-   is a reseal due?
-   - (a) serve unseals one real device key under its mutex and wipes it. No new
-     state; but a real key is in memory for a check, and with no device
-     enrolled there is nothing to check.
-   - (b) **a canary**: a worthless random secret sealed with the same PCR policy
-     as the device keys (`canary.json` in the state directory), written by
-     `init` and by every `reseal`; `/v1/status` unseals it. Existing vaults
-     need no `init` again: they show "unknown - reseal to know" until their
-     next reseal.
-   - **Recommended: (b)** - a health check should not unseal real secrets, and
-     it works with no device enrolled.
+1. **The fixed part of the master's policy.** The decision reads
+   "PolicyAuthorize(approval key, policyRef) ; PolicyPCR(selection)". A
+   PolicyPCR after PolicyAuthorize is fixed at import with fixed values, so every
+   change of the selection's values would need a new import, which needs the
+   backup. The plan therefore puts the PCR values in the **approved** part
+   (signed per approval) and fixes `PolicyCommandCode(TPM2_HMAC)` after
+   PolicyAuthorize. Is that the intent, or should a fixed PolicyPCR stay as well
+   (for example PCR 15 at a value fixed at init)?
+2. **Rolling back to an old approval.** Every approval stays valid: a vault
+   booted into an older, approved state (old firmware, an old dbx) derives
+   again. tpm2-kira revokes old approvals with a generation NV index in the
+   approved policy (PolicyNV). The same for the vault: an NV counter it defines
+   (by its own code: the vault does not depend on aSSH's `persist`), `approve
+   --retire-older` incrementing it? Recommended: yes, with `approve` asking for
+   it every time.
