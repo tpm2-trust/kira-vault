@@ -362,7 +362,13 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   counts, started at); `GET /v1/tokens` (name, mode, expires, replace, ID = first
   16 hex of the hash); `DELETE /v1/tokens/{id}`, audited. CLI: `status`, `token
   list`, `token withdraw ID`. Server tests.
-- [ ] **B7** The container: `packaging/Containerfile`, the Quadlet
+- [x] **B7** (`make container`, `make test-container`: the image builds; under a memlock
+  limit a command that holds secrets refuses first, without one it gets to the TPM; a
+  vault made in it only with `VAULT_TEST_TPM=1` and a TPM device, as it writes NV
+  0x01804000 there - this machine has none: skipped. The Quadlet is a template: under
+  `UserNS=auto` the host's tss group is mapped in as 5000 (`gidmapping`), which `make
+  install-container` fills in from `getent group tss`. Not run under podman or systemd here:
+  neither is on this machine) The container: `packaging/Containerfile`, the Quadlet
   `packaging/kira-vault.container`, `make container`. Test: build it, run it
   against a TPM device where one is available (swtpm `cuse` or the vTPM proxy),
   else skipped with the reason; vmtest's vault container may move onto it later.

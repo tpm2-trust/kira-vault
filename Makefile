@@ -2,7 +2,9 @@ BINARY  := kira-vault
 PREFIX  ?= /usr
 UNITDIR ?= /usr/lib/systemd/system
 
-.PHONY: build release-check test test-integration vet fmt install clean
+.PHONY: build release-check container install-container test-container test test-integration vet fmt install clean
+
+ENGINE ?= $(shell command -v podman || command -v docker)
 
 # The release builds the pinned core (the submodule kira/), never a
 # go.work around this checkout.
@@ -29,6 +31,20 @@ vet:
 
 fmt:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+# The image: the release binary alone (packaging/Containerfile).
+container: build
+	$(ENGINE) build -f packaging/Containerfile -t localhost/kira-vault:latest .
+
+# The Quadlet, with this host's tss group (podman, as root).
+install-container: container
+	@gid=$$(getent group tss | cut -d: -f3); test -n "$$gid" || { echo "no tss group on this host" >&2; exit 1; }; \
+	install -d $(DESTDIR)/etc/containers/systemd; \
+	sed "s/@TSS_GID@/$$gid/g" packaging/kira-vault.container.in > $(DESTDIR)/etc/containers/systemd/kira-vault.container
+
+# The container: it builds and locks; with VAULT_TEST_TPM=1 and a TPM, a vault is made in it.
+test-container: build
+	ENGINE=$(ENGINE) packaging/test-container.sh
 
 install: build
 	install -Dm0755 $(BINARY) $(DESTDIR)$(PREFIX)/bin/$(BINARY)
