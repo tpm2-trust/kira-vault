@@ -1,9 +1,8 @@
 # PLAN: `kira-vault control`
 
 Status: **confirmed by the owner (2026-11-07)**, the vault's keys and their
-approval included (decided 2026-11-07). Open: the two points under "Open
-questions", which came up while writing the key design down. Step A1 is started;
-nothing else before the word to start.
+approval included; A done (go-tui-slim's `panel` in kira's control); B and C
+started on the owner's word (2026-11-07), branch `feat/vault-keys`.
 
 ## Goal
 
@@ -286,17 +285,17 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   `tui`, `prompt`, `termguard` taken over from kira with their tests (they
   leave kira in A3); `secret` (Wipe, LockedBuffer, LockProcess, with tests);
   prompt's `SecretBuffer`/`MaxSecret` instead of diskkey. `go test ./...`.
-- [ ] **A2** **The owner first creates github.com/tpm2-trust/go-tui-slim** (done,
+- [x] **A2** (the workspace `fa90cb7`) **The owner first creates github.com/tpm2-trust/go-tui-slim** (done,
   2026-11-07). Then the workspace: go.work, `pin` (SUBMODULES for go-tui-slim and
   the vault's go-uefi-slim, the case, usage, status loop, AUR_PINS), AGENTS.md
   rows, `test-affected.py`.
-- [ ] **A3** (after the merge) kira: submodule `go-tui-slim/`, `replace`,
+- [x] **A3** (kira `b815067`, aSSH `b7587d5`) kira: submodule `go-tui-slim/`, `replace`,
   imports switched; `internal/tui`, `internal/prompt`, `internal/termguard`,
   `internal/wipe` removed, every `wipe.Bytes` → `secret.Wipe`;
   `SecretBuffer = diskkey.PassphraseBuffer`; `boot_binary_test.go` still keeps
   prompt out of the boot binary; AUR `_tuislim`. `make test-all`, control's pty
   tests.
-- [ ] **A4** (after the merge) `panel` in go-tui-slim: `Section`, `Step` (Key,
+- [x] **A4** (go-tui-slim `61367e7`, kira `41c46a7`) `panel` in go-tui-slim: `Section`, `Step` (Key,
   Title, Explain, Done, Blocked, Dirty, Optional, Danger, Destroys, Command, Run
   func() error), `Model`, `State` (keys, search, frame, sidebar, detail, status
   row), `Loop`, the run below the screen, the typed confirmation; extracted from

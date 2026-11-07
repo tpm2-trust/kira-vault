@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"github.com/tpm2-trust/kira-vault/internal/view"
 	"io"
 	"net"
 	"path/filepath"
@@ -338,7 +339,7 @@ func TestCommands(t *testing.T) {
 func TestParsePCRs(t *testing.T) {
 	for in, want := range map[string]string{"7": "7", "14, 7,0,7": "0,7,14", "": "none"} {
 		got, err := parsePCRs(in)
-		if err != nil || formatPCRs(got) != want {
+		if err != nil || view.PCRs(got) != want {
 			t.Fatalf("%q: %v %v", in, got, err)
 		}
 	}

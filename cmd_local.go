@@ -27,6 +27,7 @@ import (
 	"github.com/tpm2-trust/kira-vault/internal/server"
 	"github.com/tpm2-trust/kira-vault/internal/state"
 	"github.com/tpm2-trust/kira-vault/internal/tlsutil"
+	"github.com/tpm2-trust/kira-vault/internal/view"
 )
 
 // ── init ─────────────────────────────────────────────────────────────────
@@ -123,12 +124,12 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err := d.SaveConfig(cfg); err != nil {
 		return err
 	}
-	if err := logOnce(d, state.Entry{Event: "init", Actor: "admin", Result: "done", Detail: fmt.Sprintf("url %s, PCRs %s", cfg.URL, formatPCRs(pcrs))}); err != nil {
+	if err := logOnce(d, state.Entry{Event: "init", Actor: "admin", Result: "done", Detail: fmt.Sprintf("url %s, PCRs %s", cfg.URL, view.PCRs(pcrs))}); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(stdout, "Initialised the vault in %s.\n\n", *dir)
-	fmt.Fprintf(stdout, "  URL:   %s\n  pin:   %s  (its root's key)\n  root:  kira-vault tls root   (for the machines' %s, and curl --cacert)\n  PCRs:  %s (SHA-256)\n  TPM:   %s\n", cfg.URL, pin, "/etc/kira/vault-ca.pem", formatPCRs(pcrs), cfg.TPM)
+	fmt.Fprintf(stdout, "  URL:   %s\n  pin:   %s  (its root's key)\n  root:  kira-vault tls root   (for the machines' %s, and curl --cacert)\n  PCRs:  %s (SHA-256)\n  TPM:   %s\n", cfg.URL, pin, "/etc/kira/vault-ca.pem", view.PCRs(pcrs), cfg.TPM)
 	if u := server.OperatorURL(cfg); u != "" {
 		fmt.Fprintf(stdout, "  operator interface: %s (tokens: kira-vault operator add NAME)\n", u)
 	}
@@ -438,13 +439,13 @@ func cmdReseal(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := d.SaveConfig(cfg); err != nil {
 		return err
 	}
-	if err := logOnce(d, state.Entry{Event: "reseal", Actor: "admin", Result: "done", Detail: fmt.Sprintf("%d device keys to PCRs %s", len(devices), formatPCRs(pcrs))}); err != nil {
+	if err := logOnce(d, state.Entry{Event: "reseal", Actor: "admin", Result: "done", Detail: fmt.Sprintf("%d device keys to PCRs %s", len(devices), view.PCRs(pcrs))}); err != nil {
 		return err
 	}
 	if len(pcrs) == 0 {
 		fmt.Fprintln(stderr, noPCRWarning)
 	}
-	fmt.Fprintf(stdout, "Resealed %d device keys to the vault's PCRs %s (SHA-256) as they are now.\n", len(devices), formatPCRs(pcrs))
+	fmt.Fprintf(stdout, "Resealed %d device keys to the vault's PCRs %s (SHA-256) as they are now.\n", len(devices), view.PCRs(pcrs))
 	return nil
 }
 

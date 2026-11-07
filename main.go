@@ -140,15 +140,4 @@ func parsePCRs(s string) ([]uint8, error) {
 	return out, nil
 }
 
-func formatPCRs(p []uint8) string {
-	if len(p) == 0 {
-		return "none"
-	}
-	s := make([]string, len(p))
-	for i, v := range p {
-		s[i] = strconv.Itoa(int(v))
-	}
-	return strings.Join(s, ",")
-}
-
 const noPCRWarning = "Warning: the vault's selection is empty. The device keys are bound to this TPM only, not to the vault's boot state: a vault booted from another system releases them too."

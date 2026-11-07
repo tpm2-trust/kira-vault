@@ -1,4 +1,4 @@
-package main
+package view
 
 import (
 	"bytes"
@@ -9,13 +9,13 @@ import (
 )
 
 // The CLI shows each key above the character it types, row by row.
-func TestPrintLayout(t *testing.T) {
+func TestLayout(t *testing.T) {
 	l, err := attest.KeyboardLayoutOf(bytes.Repeat([]byte{4}, attest.KeyboardSeedSize))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var b bytes.Buffer
-	printLayout(&b, attest.KeyboardKeys, l.String())
+	Layout(&b, attest.KeyboardKeys, l.String())
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2*len(attest.KeyboardUS) {
 		t.Fatalf("%q", b.String())
@@ -32,7 +32,7 @@ func TestPrintLayout(t *testing.T) {
 		}
 	}
 	b.Reset()
-	printLayout(&b, attest.KeyboardKeys, "short")
+	Layout(&b, attest.KeyboardKeys, "short")
 	if !strings.Contains(b.String(), "malformed") {
 		t.Fatal(b.String())
 	}

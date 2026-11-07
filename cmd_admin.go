@@ -2,15 +2,10 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -19,71 +14,13 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/tpm2-trust/kira/core/attest"
 	"github.com/tpm2-trust/kira/core/vaultproto"
 
+	"github.com/tpm2-trust/kira-vault/internal/adminclient"
 	"github.com/tpm2-trust/kira-vault/internal/server"
 	"github.com/tpm2-trust/kira-vault/internal/state"
+	"github.com/tpm2-trust/kira-vault/internal/view"
 )
-
-// adminClient talks to serve over its admin socket.
-type adminClient struct {
-	socket string
-	http   *http.Client
-}
-
-func newAdminClient(socket string) *adminClient {
-	return &adminClient{socket: socket, http: &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
-		},
-	}}}
-}
-
-func (c *adminClient) send(method, path string, in any) (*http.Response, error) {
-	var body io.Reader
-	if in != nil {
-		b, err := json.Marshal(in)
-		if err != nil {
-			return nil, err
-		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, "http://vault"+path, body)
-	if err != nil {
-		return nil, err
-	}
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	rsp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("the vault's admin socket %s does not answer (is kira-vault serve running?): %w", c.socket, err)
-	}
-	if rsp.StatusCode/100 != 2 {
-		defer rsp.Body.Close()
-		var e vaultproto.ErrorResponse
-		b, _ := io.ReadAll(rsp.Body)
-		if json.Unmarshal(b, &e) != nil || e.Error == "" {
-			e.Error = strings.TrimSpace(string(b))
-		}
-		return nil, fmt.Errorf("%s", e.Error)
-	}
-	return rsp, nil
-}
-
-func (c *adminClient) do(method, path string, in, out any) error {
-	rsp, err := c.send(method, path, in)
-	if err != nil {
-		return err
-	}
-	defer rsp.Body.Close()
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(rsp.Body).Decode(out)
-}
 
 func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	ask := asker(stdin, stderr)
@@ -110,7 +47,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			*socket = cfg.AdminSocket
 		}
 	}
-	c := newAdminClient(*socket)
+	c := adminclient.New(*socket)
 	want := func(n int, form string) error {
 		if len(pos) != n {
 			return fmt.Errorf("usage: kira-vault %s", form)
@@ -132,7 +69,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		var t server.TokenResponse
-		if err := c.do("POST", "/v1/tokens", server.TokenRequest{Name: *name, Mode: m, TTLSeconds: int(ttl.Seconds()), Replace: *replace}, &t); err != nil {
+		if err := c.Do("POST", "/v1/tokens", server.TokenRequest{Name: *name, Mode: m, TTLSeconds: int(ttl.Seconds()), Replace: *replace}, &t); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Token for %s (mode %s), valid until %s:\n\n", t.Name, t.Mode, t.Expires.Local().Format(time.DateTime))
@@ -145,13 +82,13 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		var list []server.DeviceView
-		if err := c.do("GET", "/v1/devices", nil, &list); err != nil {
+		if err := c.Do("GET", "/v1/devices", nil, &list); err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "DEVICE\tNAME\tMODE\tPEPPER\tSTATE\tGENERATION\tLAST RELEASE\tSECURE BOOT")
 		for _, d := range list {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", d.ID, d.Name, d.Mode, yesNo(d.Pepper), deviceState(&d), d.MinGeneration, when(d.LastRelease), secureBootWord(d.SecureBoot))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", d.ID, d.Name, d.Mode, view.YesNo(d.Pepper), view.DeviceState(&d), d.MinGeneration, view.When(d.LastRelease), view.SecureBootWord(d.SecureBoot))
 		}
 		return tw.Flush()
 
@@ -165,14 +102,14 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			if err := want(2, "device show DEVICE"); err != nil {
 				return err
 			}
-			if err := c.do("GET", "/v1/devices/"+esc(pos[1]), nil, &d); err != nil {
+			if err := c.Do("GET", "/v1/devices/"+esc(pos[1]), nil, &d); err != nil {
 				return err
 			}
 		case "revoke", "unrevoke", "unlock":
 			if err := want(2, "device "+pos[0]+" DEVICE"); err != nil {
 				return err
 			}
-			if err := c.do("POST", "/v1/devices/"+esc(pos[1])+"/"+pos[0], nil, &d); err != nil {
+			if err := c.Do("POST", "/v1/devices/"+esc(pos[1])+"/"+pos[0], nil, &d); err != nil {
 				return err
 			}
 		case "mode":
@@ -183,13 +120,13 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			if err != nil {
 				return err
 			}
-			if err := c.do("POST", "/v1/devices/"+esc(pos[1])+"/mode", server.ModeRequest{Mode: m}, &d); err != nil {
+			if err := c.Do("POST", "/v1/devices/"+esc(pos[1])+"/mode", server.ModeRequest{Mode: m}, &d); err != nil {
 				return err
 			}
 		default:
 			return fmt.Errorf("unknown device command %q", pos[0])
 		}
-		printDevice(stdout, &d)
+		view.Device(stdout, &d)
 		return nil
 
 	case "requests":
@@ -200,13 +137,13 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		var list []server.RequestView
-		if err := c.do("GET", "/v1/requests", nil, &list); err != nil {
+		if err := c.Do("GET", "/v1/requests", nil, &list); err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "REQUEST\tDEVICE\tNAME\tSTATE\tPEPPER\tGENERATION\tFROM\tEXPIRES\tSECURE BOOT")
 		for _, q := range list {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", q.ID, q.DeviceID, q.Name, q.State, yesNo(q.Pepper), q.Generation, q.Remote, q.Expires.Local().Format(time.TimeOnly), secureBootWord(q.SecureBoot))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", q.ID, q.DeviceID, q.Name, q.State, view.YesNo(q.Pepper), q.Generation, q.Remote, q.Expires.Local().Format(time.TimeOnly), view.SecureBootWord(q.SecureBoot))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -214,7 +151,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 		for _, q := range list {
 			if q.Layout != "" {
 				fmt.Fprintf(stdout, "\nRequest %s of %s: type the pepper through this layout, for this boot alone.\n", q.ID, q.Name)
-				printLayout(stdout, q.KeyboardKeys, q.Layout)
+				view.Layout(stdout, q.KeyboardKeys, q.Layout)
 			}
 		}
 		return nil
@@ -238,7 +175,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			return err
 		}
 		var list []server.OperatorView
-		if err := c.do("GET", "/v1/operators", nil, &list); err != nil {
+		if err := c.Do("GET", "/v1/operators", nil, &list); err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -255,7 +192,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 		switch pos[0] {
 		case "add":
 			var o server.OperatorAdded
-			if err := c.do("POST", "/v1/operators", server.OperatorRequest{Name: pos[1]}, &o); err != nil {
+			if err := c.Do("POST", "/v1/operators", server.OperatorRequest{Name: pos[1]}, &o); err != nil {
 				return err
 			}
 			fmt.Fprintf(stdout, "Operator %s, token (shown this once):\n\n  %s\n\n", o.Name, o.Token)
@@ -267,7 +204,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 			}
 			return nil
 		case "remove":
-			if err := c.do("DELETE", "/v1/operators/"+esc(pos[1]), nil, nil); err != nil {
+			if err := c.Do("DELETE", "/v1/operators/"+esc(pos[1]), nil, nil); err != nil {
 				return err
 			}
 			fmt.Fprintf(stdout, "Operator %s removed: its token no longer works.\n", pos[1])
@@ -283,7 +220,7 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 		if *follow {
 			path += "?follow=1"
 		}
-		rsp, err := c.send("GET", path, nil)
+		rsp, err := c.Send("GET", path, nil)
 		if err != nil {
 			return err
 		}
@@ -291,134 +228,11 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 		sc := bufio.NewScanner(rsp.Body)
 		sc.Buffer(make([]byte, 64<<10), 1<<20)
 		for sc.Scan() {
-			fmt.Fprintln(stdout, formatEntry(sc.Bytes()))
+			fmt.Fprintln(stdout, view.Entry(sc.Bytes()))
 		}
 		return sc.Err()
 	}
 	return fmt.Errorf("unknown command %q", cmd)
-}
-
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}
-
-func deviceState(d *server.DeviceView) string {
-	var s []string
-	if d.Revoked {
-		s = append(s, "revoked")
-	}
-	if d.Locked {
-		s = append(s, "locked")
-	}
-	if len(s) == 0 {
-		return "active"
-	}
-	return strings.Join(s, ",")
-}
-
-func when(t *time.Time) string {
-	if t == nil {
-		return "never"
-	}
-	return t.Local().Format(time.DateTime)
-}
-
-func printDevice(w io.Writer, d *server.DeviceView) {
-	fmt.Fprintf(w, "device:          %s\n", d.ID)
-	fmt.Fprintf(w, "name:            %s\n", d.Name)
-	fmt.Fprintf(w, "keyslot label:   %s\n", d.Label)
-	fmt.Fprintf(w, "mode:            %s\n", d.Mode)
-	fmt.Fprintf(w, "pepper:          %s\n", yesNo(d.Pepper))
-	fmt.Fprintf(w, "state:           %s\n", deviceState(d))
-	fmt.Fprintf(w, "failures:        %d in a row\n", d.Failures)
-	fmt.Fprintf(w, "min generation:  %d\n", d.MinGeneration)
-	fmt.Fprintf(w, "machine PCRs:    %s (bank 0x%04x)\n", formatPCRs(d.Selection.Indices), d.Selection.Alg)
-	fmt.Fprintf(w, "vault PCRs:      %s\n", formatPCRs(d.VaultPCRs))
-	fmt.Fprintf(w, "enrolled:        %s\n", d.EnrolledAt.Local().Format(time.DateTime))
-	fmt.Fprintf(w, "last release:    %s\n", when(d.LastRelease))
-	fmt.Fprintf(w, "secure boot:     %s\n", red(w, d.SecureBootRed, secureBootLine(d.SecureBoot, d.SecureBootAt)))
-}
-
-// secureBootLine is a state as a person reads it; every state but on carries the
-// word WARNING, so that it stands out where there is no colour either.
-func secureBootLine(f attest.SecureBootFinding, at *time.Time) string {
-	line := f.String()
-	if f.Red() {
-		line = "WARNING: " + line
-	}
-	if at != nil {
-		line += " (established " + at.Local().Format(time.DateTime) + ")"
-	}
-	return line
-}
-
-// secureBootWord is a state in a table's column.
-func secureBootWord(f attest.SecureBootFinding) string {
-	switch f.State {
-	case attest.SecureBootOn:
-		return "on"
-	case attest.SecureBootOff:
-		return "OFF"
-	case attest.SecureBootSetupMode:
-		return "SETUP-MODE"
-	}
-	return "NOT-ESTABLISHED"
-}
-
-// red colours text on a terminal, when on says so.
-func red(w io.Writer, on bool, text string) string {
-	if !on {
-		return text
-	}
-	if f, ok := w.(*os.File); ok {
-		if _, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS); err == nil {
-			return "\033[0;31m" + text + "\033[0m"
-		}
-	}
-	return text
-}
-
-// formatEntry is an audit line for a person; a line that does not parse
-// is printed as it is.
-func formatEntry(line []byte) string {
-	var e state.Entry
-	if json.Unmarshal(line, &e) != nil {
-		return string(line)
-	}
-	parts := []string{e.Time.Local().Format(time.DateTime), e.Event}
-	if e.Result != "" {
-		parts = append(parts, e.Result)
-	}
-	if e.Device != "" {
-		dev := e.Device
-		if e.Name != "" {
-			dev += " (" + e.Name + ")"
-		}
-		parts = append(parts, dev)
-	} else if e.Name != "" {
-		parts = append(parts, e.Name)
-	}
-	if e.Request != "" {
-		parts = append(parts, "request "+e.Request)
-	}
-	if e.Actor != "" {
-		parts = append(parts, "by "+e.Actor)
-	}
-	if e.Remote != "" {
-		parts = append(parts, "from "+e.Remote)
-	}
-	if e.Detail != "" {
-		parts = append(parts, "- "+e.Detail)
-	}
-	if e.SecureBootRed {
-		parts = append(parts, "- WARNING: "+e.SecureBoot)
-	} else if e.SecureBoot != "" {
-		parts = append(parts, "- "+e.SecureBoot)
-	}
-	return strings.Join(parts, "  ")
 }
 
 // asker reads the operator's answers, one line each, from in: on a
@@ -456,14 +270,14 @@ func asker(in io.Reader, out io.Writer) func(prompt string, secret bool) (string
 
 // decideRequest approves or denies one request; an approval of a device
 // enrolled with a pepper asks the pepper and sends it along.
-func decideRequest(c *adminClient, ask func(string, bool) (string, error), id string, approve bool) (server.RequestView, error) {
+func decideRequest(c *adminclient.Client, ask func(string, bool) (string, error), id string, approve bool) (server.RequestView, error) {
 	var q server.RequestView
 	if !approve {
-		err := c.do("POST", "/v1/requests/"+url.PathEscape(id)+"/deny", struct{}{}, &q)
+		err := c.Do("POST", "/v1/requests/"+url.PathEscape(id)+"/deny", struct{}{}, &q)
 		return q, err
 	}
 	var list []server.RequestView
-	if err := c.do("GET", "/v1/requests", nil, &list); err != nil {
+	if err := c.Do("GET", "/v1/requests", nil, &list); err != nil {
 		return q, err
 	}
 	var body any = struct{}{}
@@ -480,15 +294,15 @@ func decideRequest(c *adminClient, ask func(string, bool) (string, error), id st
 		}
 		body = server.ApproveRequest{Pepper: &p}
 	}
-	err := c.do("POST", "/v1/requests/"+url.PathEscape(id)+"/approve", body, &q)
+	err := c.Do("POST", "/v1/requests/"+url.PathEscape(id)+"/approve", body, &q)
 	return q, err
 }
 
 // answerQueue goes through the releases waiting for an operator, oldest
 // first: approve, deny or skip each.
-func answerQueue(c *adminClient, ask func(string, bool) (string, error), stdout io.Writer) error {
+func answerQueue(c *adminclient.Client, ask func(string, bool) (string, error), stdout io.Writer) error {
 	var list []server.RequestView
-	if err := c.do("GET", "/v1/requests", nil, &list); err != nil {
+	if err := c.Do("GET", "/v1/requests", nil, &list); err != nil {
 		return err
 	}
 	waiting := 0
@@ -502,7 +316,7 @@ func answerQueue(c *adminClient, ask func(string, bool) (string, error), stdout 
 			pepper = ", with a pepper"
 		}
 		fmt.Fprintf(stdout, "Request %s: %s (%s), generation %d, from %s%s, until %s\n", r.ID, r.Name, r.DeviceID, r.Generation, r.Remote, pepper, r.Expires.Local().Format(time.TimeOnly))
-		fmt.Fprintf(stdout, "  %s\n", red(stdout, r.SecureBootRed, secureBootLine(r.SecureBoot, nil)))
+		fmt.Fprintf(stdout, "  %s\n", view.Red(stdout, r.SecureBootRed, view.SecureBootLine(r.SecureBoot, nil)))
 		for {
 			a, err := ask("Approve, deny or skip? [a/d/s] ", false)
 			if err != nil {
@@ -533,26 +347,4 @@ func answerQueue(c *adminClient, ask func(string, bool) (string, error), stdout 
 		fmt.Fprintln(stdout, "No release waits for an operator.")
 	}
 	return nil
-}
-
-// printLayout shows a one-time keyboard on a US keyboard, row by row: for each character of the
-// pepper the person presses the key above the line it is on.
-func printLayout(w io.Writer, keyOrder, layout string) {
-	if len(keyOrder) != len(layout) {
-		fmt.Fprintln(w, "  (the vault sent a malformed layout)")
-		return
-	}
-	for i, row := range attest.KeyboardUS {
-		indent := strings.Repeat(" ", i*2)
-		var keys, types strings.Builder
-		for _, k := range []byte(row) {
-			at := strings.IndexByte(keyOrder, k)
-			if at < 0 {
-				continue
-			}
-			fmt.Fprintf(&keys, " %c ", k)
-			fmt.Fprintf(&types, " %c ", layout[at])
-		}
-		fmt.Fprintf(w, "  key   %s%s\n  types %s%s\n", indent, keys.String(), indent, types.String())
-	}
 }
