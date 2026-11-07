@@ -29,7 +29,8 @@ type DeviceView struct {
 	Name          string                 `json:"name"`
 	Label         string                 `json:"label"`
 	Mode          vaultproto.ReleaseMode `json:"mode"`
-	Pepper        bool                   `json:"pepper"` // releases need an approval with the operator's pepper
+	Pepper        bool                   `json:"pepper"`   // releases need an approval with the operator's pepper
+	Keyboard      bool                   `json:"keyboard"` // the pepper is typed through a one-time keyboard
 	MinGeneration uint64                 `json:"min_generation"`
 	Revoked       bool                   `json:"revoked"`
 	Locked        bool                   `json:"locked"`
@@ -47,17 +48,21 @@ type DeviceView struct {
 
 // RequestView is a pending release request.
 type RequestView struct {
-	ID         string                `json:"request_id"`
-	DeviceID   string                `json:"device_id"`
-	Name       string                `json:"name"`
-	State      string                `json:"state"`
-	Pepper     bool                  `json:"pepper"` // approve it with the device's pepper
-	Actor      string                `json:"actor,omitempty"`
-	Created    time.Time             `json:"created"`
-	Expires    time.Time             `json:"expires"`
-	Remote     string                `json:"remote"`
-	Generation uint64                `json:"generation"`
-	PCRValues  []vaultproto.PCRValue `json:"pcr_values"`
+	ID       string `json:"request_id"`
+	DeviceID string `json:"device_id"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Pepper   bool   `json:"pepper"` // approve it with the device's pepper
+	// A keyboard device's released request: on the key KeyboardKeys[i] the character Layout[i],
+	// for this boot alone; shown for LayoutTTL, never in the audit.
+	KeyboardKeys string                `json:"keyboard_keys,omitempty"`
+	Layout       string                `json:"layout,omitempty"`
+	Actor        string                `json:"actor,omitempty"`
+	Created      time.Time             `json:"created"`
+	Expires      time.Time             `json:"expires"`
+	Remote       string                `json:"remote"`
+	Generation   uint64                `json:"generation"`
+	PCRValues    []vaultproto.PCRValue `json:"pcr_values"`
 	// SecureBoot is what this request's quote established. SecureBootRed marks
 	// every state but on: an operator sees it before approving.
 	SecureBoot    attest.SecureBootFinding `json:"secure_boot"`
@@ -128,7 +133,7 @@ func viewOf(d *state.Device) DeviceView {
 	}
 	return DeviceView{
 		SecureBoot: sb, SecureBootRed: sb.Red(), SecureBootAt: d.SecureBootAt,
-		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired,
+		ID: hex.EncodeToString(d.ID), Name: d.Name, Label: d.Label, Mode: d.Mode, Pepper: d.PepperRequired, Keyboard: d.Keyboard,
 		MinGeneration: d.MinGeneration, Revoked: d.Revoked, Locked: d.Locked, Failures: d.Failures,
 		EnrolledAt: d.EnrolledAt, LastRelease: d.LastRelease, Selection: d.Selection, VaultPCRs: d.Sealed.PCRs,
 	}
@@ -268,6 +273,17 @@ func (s *Server) adminRequests(w http.ResponseWriter, r *http.Request) {
 		if q.checked != nil {
 			v.Generation, v.PCRValues = q.checked.Generation, q.checked.PCRValues
 			v.SecureBoot, v.SecureBootRed = q.checked.SecureBoot, q.checked.SecureBoot.Red()
+		}
+		views = append(views, v)
+	}
+	for _, l := range s.layouts {
+		if !now.Before(l.expires) {
+			continue
+		}
+		v := RequestView{ID: l.request, DeviceID: hex.EncodeToString(l.device), State: "released", Created: l.created, Expires: l.expires, Remote: l.remote,
+			KeyboardKeys: attest.KeyboardKeys, Layout: l.layout.String()}
+		if d, err := s.dir.Device(l.device); err == nil {
+			v.Name = d.Name
 		}
 		views = append(views, v)
 	}

@@ -91,6 +91,7 @@ type Server struct {
 	mu       sync.Mutex
 	enrols   map[string]*enrolment
 	requests map[string]*request
+	layouts  map[string]*shown // by request ID
 	rate     map[string][]time.Time
 
 	authFails map[string][]time.Time // failed operator authentications per remote address
@@ -128,6 +129,20 @@ type request struct {
 	pepper []byte // the approval's pepper, until the release passes it on
 }
 
+// shown is a keyboard device's layout of one release, for an operator to read for a while: in
+// memory alone, never in the audit.
+type shown struct {
+	request string
+	device  []byte
+	created time.Time
+	expires time.Time
+	layout  *attest.KeyboardLayout
+	remote  string
+}
+
+// LayoutTTL is how long a released layout is shown: as long as a person takes to type.
+const LayoutTTL = 15 * time.Minute
+
 // forget drops a request and wipes its pepper.
 func (s *Server) forget(q *request) {
 	clear(q.pepper)
@@ -149,6 +164,7 @@ func New(o Options) *Server {
 		dir: o.Dir, cfg: o.Config, sealer: o.Sealer, audit: o.Audit, pin: o.Pin, now: now, log: lg,
 		enrols:   map[string]*enrolment{},
 		requests: map[string]*request{},
+		layouts:  map[string]*shown{},
 		rate:     map[string][]time.Time{},
 
 		authFails: map[string][]time.Time{},
@@ -425,6 +441,7 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 		Label:               req.Label,
 		Mode:                mode,
 		PepperRequired:      req.Pepper,
+		Keyboard:            req.Keyboard,
 		EKPublic:            req.EKPublic,
 		EKCert:              req.EKCert,
 		ReleaseKeyName:      rkName,
@@ -462,6 +479,9 @@ func (s *Server) enrolConfirm(c *vaultproto.EnrolConfirm, remote string) (*vault
 	}
 	if rec.PepperRequired {
 		detail += ", with a pepper"
+	}
+	if rec.Keyboard {
+		detail += ", a pepper typed through a one-time keyboard"
 	}
 	if err := s.logAudit(state.Entry{Event: "enrol-confirm", Device: dev, Name: req.Name, Request: c.EnrolID, Remote: remote, Result: "enrolled", Detail: fmt.Sprintf("%s, mode %s, generation %d", detail, rec.Mode, rec.MinGeneration)}); err != nil {
 		return nil, err
@@ -535,6 +555,12 @@ func (s *Server) sweep(now time.Time) {
 	for _, q := range s.requests {
 		if now.Sub(q.expires) > ChallengeTTL {
 			s.forget(q)
+		}
+	}
+	for id, l := range s.layouts {
+		if !now.Before(l.expires) {
+			l.layout.Wipe()
+			delete(s.layouts, id)
 		}
 	}
 }
@@ -696,15 +722,33 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		return deny("the vault could not open the device's record")
 	}
 
+	// A keyboard's seed, wrapped before anything is saved: a failure releases nothing.
+	var keyboard *vaultproto.Wrapped
+	if d.Keyboard {
+		if len(d.ReleaseKeyName) == 0 {
+			return deny("this device has no release key to wrap the keyboard for: enrol it again")
+		}
+		w, layout, err := vaultproto.WrapKeyboard(rand.Reader, d.EKPublic, d.ReleaseKeyName)
+		if err != nil {
+			s.log.Printf("device %s: wrapping the keyboard: %v", dev, err)
+			return deny("the vault could not wrap the keyboard for the device's TPM")
+		}
+		keyboard = w
+		s.layouts[q.id] = &shown{request: q.id, device: q.device, created: now, expires: now.Add(LayoutTTL), layout: layout, remote: q.remote}
+	}
 	if checked.Generation > d.MinGeneration {
 		d.MinGeneration = checked.Generation
 	}
 	t := now.UTC()
 	d.LastRelease = &t
 	if err := s.dir.SaveDevice(d); err != nil {
+		if l := s.layouts[q.id]; l != nil {
+			l.layout.Wipe()
+			delete(s.layouts, q.id)
+		}
 		return nil, err
 	}
-	res := &vaultproto.ReleaseResponse{Status: vaultproto.StatusReleased, Remote: &wrapped}
+	res := &vaultproto.ReleaseResponse{Status: vaultproto.StatusReleased, Remote: &wrapped, Keyboard: keyboard}
 	entry.Result, entry.Detail = "released", fmt.Sprintf("generation %d, TPM reset count %d", checked.Generation, checked.ResetCount)
 	if q.state == approved {
 		entry.Detail += ", approved by " + q.actor
@@ -715,6 +759,9 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 			return deny("the vault could not wrap the pepper for the device's TPM")
 		}
 		entry.Detail += ", with a pepper"
+	}
+	if d.Keyboard {
+		entry.Detail += ", with a one-time keyboard"
 	}
 	s.forget(q)
 	if err := s.logAudit(entry); err != nil {

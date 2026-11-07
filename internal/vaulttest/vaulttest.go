@@ -38,6 +38,7 @@ type Machine struct {
 	Gen       uint64
 	Approval  []byte
 	Pepper    bool               // the keyslot is enrolled with an operator's pepper
+	Keyboard  bool               // the keyslot takes a pepper typed through the vault's keyboard
 	R         []byte             // the remote part in the clear, as the machine drew it
 	Remote    vaultproto.Wrapped // R wrapped for the TPM: its EK and the slot's release key
 	RKPublic  []byte             // the slot's release key (TPMT_PUBLIC)
@@ -117,7 +118,7 @@ func (m *Machine) EnrolRequest(token string) *vaultproto.EnrolRequest {
 		EKPublic: m.TPM.EKPub, AKPublic: m.TPM.AKPub,
 		SigningPublic: m.SigningPublic(), PolicyRef: m.PolicyRef, GenerationIndexName: m.GenIndex,
 		Generation: m.Gen, Selection: m.Selection, Remote: m.Remote, Label: "root", Pepper: m.Pepper,
-		ReleaseKeyPublic: m.RKPublic,
+		ReleaseKeyPublic: m.RKPublic, Keyboard: m.Keyboard,
 	}
 }
 

@@ -70,9 +70,12 @@ type Device struct {
 	// PepperRequired: the machine's key is derived with an operator's
 	// pepper as well, so every release needs an approval carrying it. Such
 	// a device is always in approve mode.
-	PepperRequired bool   `json:"pepper_required"`
-	EKPublic       []byte `json:"ek_public"`
-	EKCert         []byte `json:"ek_cert,omitempty"`
+	PepperRequired bool `json:"pepper_required"`
+	// Keyboard: the keyslot takes a pepper typed through the vault's one-time keyboard; every
+	// release carries a seed for the TPM, whose layout the vault shows (vaultproto/keyboard.go).
+	Keyboard bool   `json:"keyboard,omitempty"`
+	EKPublic []byte `json:"ek_public"`
+	EKCert   []byte `json:"ek_cert,omitempty"`
 	// ReleaseKeyName is the Name of the slot's release key, checked at
 	// enrolment: a pepper is wrapped for it and the EK at every release.
 	ReleaseKeyName []byte `json:"release_key_name,omitempty"`

@@ -57,4 +57,10 @@ or `{"pepper":"…"}`), `POST /v1/requests/{id}/deny`, `GET /v1/devices` and
 `GET /v1/devices/{id}`, nothing else, over TLS with the vault's own root
 (`tls root`), which machines and operators verify the vault against.
 
+A keyslot enrolled with `--keyboard-pepper` takes a pepper of the person's that no device keeps: with
+every release the vault sends a seed for that boot, wrapped for the machine's TPM, and shows its
+one-time keyboard layout, in `tpm2-kira-vault requests` (a request in state `released`) and in
+`layout` of `GET /v1/requests`, for 15 minutes, never in the audit. The person types the pepper at
+the machine through it (tpm2-kira's docs/VAULT.md §12a).
+
 `tpm2-kira-vault help` lists every command.
