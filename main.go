@@ -26,6 +26,7 @@ const usage = `kira-vault keeps the remote parts of kira's tpm+vault keyslots
 and releases each to its machine's TPM at boot (kira docs/VAULT.md).
 
 Usage:
+  kira-vault control [--dir DIR] [--socket PATH] [--lines] [--debug]
   kira-vault init   [--dir DIR] [--listen :8443] [--url https://HOST:8443] [--pcrs 7,15] [--tpm /dev/tpmrm0]
                          [--admin-socket PATH] [--operator-listen :8444]
   kira-vault init --restore [--dir DIR]
@@ -48,6 +49,10 @@ Usage:
   kira-vault operators
   kira-vault operator add|remove NAME
   kira-vault help
+
+control is the vault's control panel, as root: from an empty host to a serving
+vault and through its daily work, every step the command it equals; a full
+screen on a terminal, line menus with --lines, everything printed without one.
 
 The vault's keys: init draws a master key, shows it once as the backup - its only
 recovery secret - and imports it into the TPM, where each machine's key is derived
@@ -103,13 +108,14 @@ func isTerminal(f *os.File) bool {
 // command holds a secret; tests replace it.
 var lockProcess = secret.LockProcess
 
-// holdsSecrets are the commands that hold a secret: serve (the device keys, the
+// holdsSecrets are the commands that hold a secret: control (what it runs: init,
+// approve, a pepper), serve (the device keys, the
 // peppers in the queue), init (the master, the PIN), approve (the PIN), backup (the
 // master), token create and operator add (a token shown once), request and requests
 // (a pepper typed).
 func holdsSecrets(cmd string) bool {
 	switch cmd {
-	case "init", "serve", "approve", "backup", "token", "request", "requests", "operator":
+	case "init", "serve", "approve", "backup", "token", "request", "requests", "operator", "control":
 		return true
 	}
 	return false
@@ -150,6 +156,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return cmdBackup(rest, stdin, stdout, stderr)
 	case "serve":
 		return cmdServe(rest, stderr)
+	case "control":
+		return cmdControl(rest, stdin, stdout, stderr)
 	case "config":
 		return cmdConfig(rest, stdout, stderr)
 	case "tls":

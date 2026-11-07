@@ -372,19 +372,19 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   `packaging/kira-vault.container`, `make container`. Test: build it, run it
   against a TPM device where one is available (swtpm `cuse` or the vTPM proxy),
   else skipped with the reason; vmtest's vault container may move onto it later.
-- [ ] **C1** `internal/control`: facts (`facts.go`: fast/slow, deployment
+- [x] **C1** (the host's Secure Boot through go-uefi-slim's new `efivar.SecureBootState`, which kira's `sbstate` reads through too; control inside serve's container, by the engines' marks, is "in a container") `internal/control`: facts (`facts.go`: fast/slow, deployment
   detection, the host's Secure Boot via go-uefi-slim, approval due, the judged
   lines), model (`model.go`: sections, steps, states, commands, danger), line
   mode and the printout without a terminal. Unit tests on fixture facts: every
   step's state and command, every red line's condition, each deployment.
-- [ ] **C2** Full screen on `panel`; `control` in main.go and the usage; the pty
+- [x] **C2** Full screen on `panel`; `control` in main.go and the usage; the pty
   test (kira's `control_screen_test.go` pattern: `unix.Openpt`, keys in,
   frame out, terminal restored on q/Ctrl-C).
-- [ ] **C3** Guided actions: init and restore, run it (unit/container), enrol a
+- [x] **C3** (against a recorded CLI: what each action runs with what was answered; a destroy only on its typed word) Guided actions: init and restore, run it (unit/container), enrol a
   machine, tokens, devices, requests with pepper, operators with serve stopped
   and started, approve, backup check. Tests against a fake admin socket
   (`httptest` on a Unix socket) and the line mode fed through a pipe.
-- [ ] **C4** Integration (`-tags integration`, swtpm): `TestControlOnSWTPM`:
+- [x] **C4** (`TestControlOnSWTPM`: control's printout of a vault on swtpm, serve in-process; the approval due after PCR 23 moved, green again after `approve`) Integration (`-tags integration`, swtpm): `TestControlOnSWTPM`:
   `control --lines` creates the vault, serve in-process (`serve(ctx, d, …,
   ready)`), enrol token, operator add, a PCR extended → "approval due" → approve
   → green; the overview green except the TPM line where it must be.

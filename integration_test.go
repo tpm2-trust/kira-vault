@@ -57,3 +57,38 @@ func TestVaultOnSWTPM(t *testing.T) {
 	res = approve(t, v, alice, p, `{"pepper":"from the operator"}`)
 	wantReleased(t, p, res)
 }
+
+// control on a vault of a software TPM: it prints what the vault is, judged - serve
+// answering (here in-process: neither the unit nor a container), the approval in use,
+// the machines' port verified against the root, the device - and after the vault's
+// PCR moved, the approval due, until approved.
+func TestControlOnSWTPM(t *testing.T) {
+	sock := vaulttest.StartSWTPM(t)
+	v := initVault(t, "--tpm", sock, "--pcrs", "23")
+	v.start()
+	v.enrol("db-03")
+	look := func() string {
+		t.Helper()
+		out, err := cli(t, "", "control", "--dir", v.dir, "--socket", v.sock)
+		if err != nil {
+			t.Fatalf("control: %v\n%s", err, out)
+		}
+		return out
+	}
+	out := look()
+	for _, want := range []string{"serve runs, neither under the unit nor in a container", "approval", "in use", "answers, verified against the root and its pin", "1 enrolled", "Enrol a machine", "kira-vault token create"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("control lacks %q:\n%s", want, out)
+		}
+	}
+	vaulttest.ExtendPCR(t, sock, 23, "another boot of the vault")
+	if out := look(); !strings.Contains(out, "due: PCR 23 moved") {
+		t.Fatalf("control after PCR 23 moved:\n%s", out)
+	}
+	if out, err := cli(t, testPIN+"\n", "approve", "--dir", v.dir); err != nil {
+		t.Fatalf("approve: %v\n%s", err, out)
+	}
+	if out := look(); strings.Contains(out, "due") {
+		t.Fatalf("control after the approval:\n%s", out)
+	}
+}

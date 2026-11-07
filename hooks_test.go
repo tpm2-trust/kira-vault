@@ -24,6 +24,7 @@ var locks int
 func TestMain(m *testing.M) {
 	lockProcess = func() error { locks++; return nil }
 	reachable = func(string, string) error { return nil }
+	controlAllowUser = true
 	// The vault host of the tests: its logs say all is well (bootstate's tests say
 	// what they say otherwise), its state directory on an encrypted volume.
 	gatherEvidence = func(string, []byte, []byte) *bootstate.Evidence {
@@ -58,7 +59,7 @@ func fakeTPM(path string) *vaulttest.TPM { return newTPM(path).(*vaulttest.TPM) 
 // The commands that hold a secret lock the process first, and stop before anything if
 // it cannot be; the others do not lock.
 func TestSecretCommandsLockFirst(t *testing.T) {
-	for _, cmd := range []string{"init", "serve", "approve", "backup", "token", "request", "requests", "operator"} {
+	for _, cmd := range []string{"init", "serve", "approve", "backup", "token", "request", "requests", "operator", "control"} {
 		if !holdsSecrets(cmd) {
 			t.Errorf("%s does not lock", cmd)
 		}
