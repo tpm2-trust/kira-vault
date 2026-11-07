@@ -4,8 +4,9 @@ go 1.26.0
 
 require (
 	github.com/google/go-tpm v0.9.9-0.20261030171821-c395998989d7
+	github.com/tpm2-trust/go-tui-slim v0.0.0
 	github.com/tpm2-trust/kira/core v0.0.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
@@ -21,3 +22,11 @@ replace github.com/tpm2-trust/kira/core => ./kira/core
 // The core's EK root store, tpm2-verifier: the pinned kira's own
 // submodule (git submodule update --init --recursive).
 replace github.com/tpm2-trust/tpm2-verifier => ./kira/tpm2-verifier
+
+// go-tui-slim (the control panel, its questions, the secrets' memory) and
+// go-uefi-slim (the vault host's Secure Boot): the vault's own submodules, not
+// kira/'s, so that they move with the vault's pins (../pin go-tui-slim,
+// ../pin go-uefi-slim).
+replace github.com/tpm2-trust/go-tui-slim => ./go-tui-slim
+
+replace github.com/tpm2-trust/go-uefi-slim => ./go-uefi-slim

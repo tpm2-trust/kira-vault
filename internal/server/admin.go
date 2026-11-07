@@ -17,6 +17,7 @@ import (
 	"github.com/tpm2-trust/kira/core/attest"
 	"github.com/tpm2-trust/kira/core/vaultproto"
 
+	"github.com/tpm2-trust/kira-vault/internal/secretjson"
 	"github.com/tpm2-trust/kira-vault/internal/state"
 )
 
@@ -76,9 +77,10 @@ type ModeRequest struct {
 
 // ApproveRequest is the body of POST /v1/requests/{id}/approve. Pepper is
 // required for a device enrolled with one and refused for any other: UTF-8,
-// 1 to vaultproto.MaxPepper bytes.
+// 1 to vaultproto.MaxPepper bytes. It is read as bytes, never a string
+// (secretjson), and wiped when the release has passed it on or the request is gone.
 type ApproveRequest struct {
-	Pepper *string `json:"pepper,omitempty"`
+	Pepper *secretjson.Bytes `json:"pepper,omitempty"`
 }
 
 // TokenRequest is the body of POST /v1/tokens.
@@ -305,16 +307,22 @@ func (s *Server) adminDecide(to reqState) http.HandlerFunc {
 				return
 			}
 			var a ApproveRequest
+			var perr error
 			if len(bytes.TrimSpace(body)) > 0 {
-				if err := json.Unmarshal(body, &a); err != nil {
-					s.answer(w, nil, fail(http.StatusBadRequest, "the request does not parse: %v", err))
-					return
-				}
+				perr = json.Unmarshal(body, &a)
 			}
-			clear(body)
+			clear(body) // the pepper's only other copy
+			if perr != nil {
+				if a.Pepper != nil {
+					clear(*a.Pepper)
+				}
+				s.answer(w, nil, fail(http.StatusBadRequest, "the request does not parse: %v", perr))
+				return
+			}
 			if a.Pepper != nil {
-				pepper = []byte(*a.Pepper)
+				pepper = *a.Pepper
 				if len(pepper) == 0 || len(pepper) > vaultproto.MaxPepper {
+					clear(pepper)
 					s.answer(w, nil, fail(http.StatusBadRequest, "a pepper has 1 to %d bytes", vaultproto.MaxPepper))
 					return
 				}

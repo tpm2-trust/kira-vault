@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tpm2-trust/go-tui-slim/secret"
+
 	"github.com/tpm2-trust/kira-vault/internal/keys"
 )
 
@@ -66,6 +68,21 @@ approved with {"pepper":"..."}.
 // newSealer is the sealing backend for a TPM path; tests replace it.
 var newSealer = func(path string) keys.Sealer { return &keys.TPMSealer{Path: path} }
 
+// lockProcess locks the process in memory and makes it not dumpable, before a
+// command holds a secret; tests replace it.
+var lockProcess = secret.LockProcess
+
+// holdsSecrets are the commands that hold a secret: serve (the device keys, the
+// peppers in the queue), init and reseal (the recovery key), token create and
+// operator add (a token shown once), request and requests (a pepper typed).
+func holdsSecrets(cmd string) bool {
+	switch cmd {
+	case "init", "serve", "reseal", "token", "request", "requests", "operator":
+		return true
+	}
+	return false
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -82,6 +99,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return errors.New("no command")
 	}
 	cmd, rest := args[0], args[1:]
+	if holdsSecrets(cmd) {
+		if err := lockProcess(); err != nil {
+			return fmt.Errorf("%s holds secrets, and the process is not locked in memory: %w (the unit sets LimitMEMLOCK=infinity, a container --ulimit memlock=-1:-1)", cmd, err)
+		}
+	}
 	switch cmd {
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)

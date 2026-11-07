@@ -301,10 +301,10 @@ and control) is merged**; A1, A2 and the B steps do not wait.
   row), `Loop`, the run below the screen, the typed confirmation; extracted from
   `control_screen.go` with its frame/keys/pty tests. kira's control adapts;
   `make test-all`; nothing it shows changes.
-- [ ] **B1** Vault refactor: `adminClient` → `internal/adminclient`; renderers
+- [x] **B1** (`cdcaa04`) Vault refactor: `adminClient` → `internal/adminclient`; renderers
   (`printDevice`, `printLayout`, `secureBootLine`, `formatEntry`) →
   `internal/view`. No behaviour change; `make test`.
-- [ ] **B2** Memory and reach: the vault requires go-tui-slim and go-uefi-slim
+- [x] **B2** Memory and reach (peppers as bytes through `internal/secretjson`, both ways): the vault requires go-tui-slim and go-uefi-slim
   (submodules, `replace`); `secret.LockProcess()` in serve and in every command
   holding a secret; secrets read into locked byte buffers, not strings;
   `LimitMEMLOCK=infinity` in the unit (`LockProcess` refuses a finite limit without `CAP_IPC_LOCK`, which the unit does not give). `init` refuses an unreachable

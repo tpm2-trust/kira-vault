@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,14 +17,18 @@ import (
 
 	"github.com/tpm2-trust/kira/core/vaultproto"
 
+	"github.com/tpm2-trust/go-tui-slim/prompt"
+	"github.com/tpm2-trust/go-tui-slim/secret"
+
 	"github.com/tpm2-trust/kira-vault/internal/adminclient"
+	"github.com/tpm2-trust/kira-vault/internal/secretjson"
 	"github.com/tpm2-trust/kira-vault/internal/server"
 	"github.com/tpm2-trust/kira-vault/internal/state"
 	"github.com/tpm2-trust/kira-vault/internal/view"
 )
 
 func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	ask := asker(stdin, stderr)
+	ask := newAsker(stdin, stderr)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "state directory whose configured admin socket to use")
@@ -235,72 +240,103 @@ func cmdAdmin(cmd string, args []string, stdin io.Reader, stdout, stderr io.Writ
 	return fmt.Errorf("unknown command %q", cmd)
 }
 
-// asker reads the operator's answers, one line each, from in: on a
-// terminal after a prompt on out - a secret without echo -, from a pipe as
-// they come. One reader for all of them, so that piped answers follow each
-// other.
-func asker(in io.Reader, out io.Writer) func(prompt string, secret bool) (string, error) {
-	br := bufio.NewReader(in)
-	return func(prompt string, secret bool) (string, error) {
-		if f, ok := in.(*os.File); ok {
-			fd := int(f.Fd())
-			if t, err := unix.IoctlGetTermios(fd, unix.TCGETS); err == nil {
-				fmt.Fprint(out, prompt)
-				if secret {
-					quiet := *t
-					quiet.Lflag &^= unix.ECHO
-					quiet.Lflag |= unix.ICANON | unix.ISIG
-					if err := unix.IoctlSetTermios(fd, unix.TCSETS, &quiet); err != nil {
-						return "", err
-					}
-					defer func() {
-						unix.IoctlSetTermios(fd, unix.TCSETS, t)
-						fmt.Fprintln(out)
-					}()
-				}
-			}
-		}
-		line, err := br.ReadString('\n')
-		if err != nil && !(errors.Is(err, io.EOF) && line != "") {
-			return "", fmt.Errorf("no answer: %w", err)
-		}
-		return strings.TrimRight(line, "\r\n"), nil
-	}
+// asker asks the operator, one answer a line, all from in: on a terminal after a prompt
+// on out, from a pipe as the answers come. in is read byte by byte, never ahead, so
+// that piped answers follow each other.
+type asker struct {
+	in  io.Reader
+	out io.Writer
+	p   *prompt.Prompter
 }
 
-// decideRequest approves or denies one request; an approval of a device
-// enrolled with a pepper asks the pepper and sends it along.
-func decideRequest(c *adminclient.Client, ask func(string, bool) (string, error), id string, approve bool) (server.RequestView, error) {
+func newAsker(in io.Reader, out io.Writer) *asker {
+	p := prompt.New(in, out)
+	p.SecretBuffer = func() []byte {
+		b, _ := secret.LockedBuffer(vaultproto.MaxPepper) // the process is locked already
+		return b
+	}
+	return &asker{in: in, out: out, p: p}
+}
+
+// line is an answer that is shown.
+func (a *asker) line(text string) (string, error) {
+	if f, ok := a.in.(*os.File); ok {
+		if _, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS); err == nil {
+			fmt.Fprint(a.out, text)
+		}
+	}
+	var b []byte
+	one := make([]byte, 1)
+	for {
+		n, err := a.in.Read(one)
+		if n == 1 {
+			if one[0] == '\n' {
+				break
+			}
+			if len(b) < prompt.MaxLine {
+				b = append(b, one[0])
+			}
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && len(b) > 0 {
+				break
+			}
+			return "", fmt.Errorf("no answer: %w", err)
+		}
+	}
+	return strings.TrimRight(string(b), "\r"), nil
+}
+
+// secret is an answer that is not shown, in a locked buffer: the caller wipes it.
+func (a *asker) secret(text string) ([]byte, error) {
+	return a.p.Password(text, "", nil)
+}
+
+// decideRequest approves or denies one request; an approval of a device enrolled with
+// a pepper asks the pepper and sends it along, in a body built in a locked buffer: the
+// pepper is never a string here.
+func decideRequest(c *adminclient.Client, ask *asker, id string, approve bool) (server.RequestView, error) {
 	var q server.RequestView
+	path := "/v1/requests/" + url.PathEscape(id)
 	if !approve {
-		err := c.Do("POST", "/v1/requests/"+url.PathEscape(id)+"/deny", struct{}{}, &q)
+		err := c.Do("POST", path+"/deny", struct{}{}, &q)
 		return q, err
 	}
 	var list []server.RequestView
 	if err := c.Do("GET", "/v1/requests", nil, &list); err != nil {
 		return q, err
 	}
-	var body any = struct{}{}
 	for _, r := range list {
 		if r.ID != id || !r.Pepper {
 			continue
 		}
-		p, err := ask(fmt.Sprintf("Pepper for %s (%s): ", r.Name, r.DeviceID), true)
+		p, err := ask.secret(fmt.Sprintf("Pepper for %s (%s):", r.Name, r.DeviceID))
 		if err != nil {
 			return q, err
 		}
-		if p == "" {
+		defer secret.Wipe(p)
+		if len(p) == 0 {
 			return q, errors.New("this device was enrolled with a pepper: an approval without it is no approval")
 		}
-		body = server.ApproveRequest{Pepper: &p}
+		const open, end = `{"pepper":`, `}`
+		body, _ := secret.LockedBuffer(len(open) + secretjson.QuotedLen(p) + len(end))
+		defer secret.Wipe(body)
+		body = append(body, open...)
+		if body, err = secretjson.AppendQuoted(body, p); err != nil {
+			return q, err
+		}
+		body = append(body, end...)
+		err = c.DoBody("POST", path+"/approve", bytes.NewReader(body), &q)
+		return q, err
 	}
-	err := c.Do("POST", "/v1/requests/"+url.PathEscape(id)+"/approve", body, &q)
+	err := c.Do("POST", path+"/approve", struct{}{}, &q)
 	return q, err
 }
 
 // answerQueue goes through the releases waiting for an operator, oldest
 // first: approve, deny or skip each.
-func answerQueue(c *adminclient.Client, ask func(string, bool) (string, error), stdout io.Writer) error {
+func answerQueue(c *adminclient.Client, ask *asker, stdout io.Writer) error {
 	var list []server.RequestView
 	if err := c.Do("GET", "/v1/requests", nil, &list); err != nil {
 		return err
@@ -318,7 +354,7 @@ func answerQueue(c *adminclient.Client, ask func(string, bool) (string, error), 
 		fmt.Fprintf(stdout, "Request %s: %s (%s), generation %d, from %s%s, until %s\n", r.ID, r.Name, r.DeviceID, r.Generation, r.Remote, pepper, r.Expires.Local().Format(time.TimeOnly))
 		fmt.Fprintf(stdout, "  %s\n", view.Red(stdout, r.SecureBootRed, view.SecureBootLine(r.SecureBoot, nil)))
 		for {
-			a, err := ask("Approve, deny or skip? [a/d/s] ", false)
+			a, err := ask.line("Approve, deny or skip? [a/d/s] ")
 			if err != nil {
 				return err
 			}

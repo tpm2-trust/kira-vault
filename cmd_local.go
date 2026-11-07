@@ -53,6 +53,9 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := reachable(*tpmPath, *sock); err != nil {
+		return err
+	}
 	_, port, err := net.SplitHostPort(*listen)
 	if err != nil {
 		return fmt.Errorf("--listen %q: %w", *listen, err)
