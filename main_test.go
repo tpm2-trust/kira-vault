@@ -72,7 +72,7 @@ func initVault(t *testing.T, extra ...string) *vault {
 	dir := t.TempDir()
 	addr := freePort(t)
 	v := &vault{t: t, dir: filepath.Join(dir, "state"), sock: filepath.Join(dir, "admin.sock"), url: "https://" + addr, tpm: "fake:" + dir}
-	args := []string{"init", "--dir", v.dir, "--listen", addr, "--url", v.url, "--admin-socket", v.sock}
+	args := []string{"init", "--dir", v.dir, "--listen", addr, "--url", v.url, "--admin-socket", v.sock, "--challenge-rate", "1000"}
 	for i, a := range extra {
 		if a == "--tpm" && i+1 < len(extra) {
 			v.tpm = extra[i+1]

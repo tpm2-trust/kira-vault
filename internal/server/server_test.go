@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -59,7 +60,10 @@ func newEnv(t *testing.T) *env {
 	}
 	pin := certs.Pin()
 	e.pin, e.root, e.certs = pin, certs.RootPEM(), certs
-	e.cfg = &state.Config{Listen: ":0", URL: "https://vault.example:8443", PCRs: []uint8{7, 15}}
+	// Every machine of a test comes from one address: the limit per address is
+	// out of the way of what the other rules are tested with, and tested by its
+	// own (TestAddressLimit).
+	e.cfg = &state.Config{Listen: ":0", URL: "https://vault.example:8443", PCRs: []uint8{7, 15}, ChallengeRate: 1000}
 	audit, err := state.OpenAudit(e.dir.AuditPath(), e.clock.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -857,5 +861,124 @@ func TestStatusAndTokens(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the withdrawal is not in the audit log")
+	}
+}
+
+// A device ID is no secret: what is sent under it without the device's
+// attestation key locks nothing and counts nothing, however often.
+func TestGarbageLocksNoDevice(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(0)
+	for i := 0; i < 2*server.MaxFailures; i++ {
+		ch, err := m.Challenge(e.client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := m.ReleaseRequest(ch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.QuoteSignature = bytes.Repeat([]byte{0x5a}, len(req.QuoteSignature))
+		res, err := e.client.Send(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, res, vaultproto.StatusDenied, "")
+		if strings.Contains(res.Reason, "locked") {
+			t.Fatalf("attempt %d locked the device: %q", i, res.Reason)
+		}
+		e.clock.Advance(10 * time.Second)
+	}
+	if d := e.device(m); d.Locked || d.Failures != 0 {
+		t.Fatalf("garbage changed the device: locked %v, %d failures", d.Locked, d.Failures)
+	}
+	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+}
+
+// One address gets the configured number of challenges per minute, 3 unless the
+// configuration says otherwise, and what it asks beyond that counts against no
+// device.
+func TestAddressLimit(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(0)
+	e.cfg.ChallengeRate = 0 // the default
+	for i := 0; i < state.DefaultChallengeRate; i++ {
+		if _, err := m.Challenge(e.client); err != nil {
+			t.Fatalf("challenge %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 2*server.RateLimit; i++ {
+		_, err := m.Challenge(e.client)
+		wantHTTP(t, err, 429, "per address")
+	}
+	e.clock.Advance(server.RateWindow)
+	// The device's own limit was not used up by the refused ones.
+	e.cfg.ChallengeRate = 1000
+	for i := 0; i < server.RateLimit; i++ {
+		if _, err := m.Challenge(e.client); err != nil {
+			t.Fatalf("after the window, challenge %d: %v", i, err)
+		}
+	}
+	e.cfg.ChallengeRate = 5
+	e.clock.Advance(server.RateWindow)
+	for i := 0; i < 5; i++ {
+		if _, err := m.Challenge(e.client); err != nil {
+			t.Fatalf("at 5 per minute, challenge %d: %v", i, err)
+		}
+	}
+	_, err := m.Challenge(e.client)
+	wantHTTP(t, err, 429, "at most 5")
+}
+
+// Whoever reaches the vault cannot fill its audit log: what is refused before
+// authentication is written a bounded number of times, the rest as a count.
+func TestRefusalsBeforeAuthenticationAreBounded(t *testing.T) {
+	e := newEnv(t)
+	m := e.machine(0)
+	before := len(e.auditLines())
+	const flood = 300
+	for i := 0; i < flood; i++ {
+		stranger := &vaulttest.Machine{DeviceID: bytes.Repeat([]byte{byte(i), byte(i >> 8)}, vaultproto.DeviceIDSize/2)}
+		_, err := stranger.Challenge(e.client)
+		wantHTTP(t, err, 404, "unknown device")
+		other, _ := vaulttest.NewMachine("x")
+		req := other.EnrolRequest(fmt.Sprintf("no-token-%d", i))
+		wantHTTP(t, e.client.Post(vaultproto.PathEnrol, req, new(vaultproto.EnrolChallenge)), 403, "unknown or used")
+	}
+	if n := len(e.auditLines()) - before; n > server.QuietLines {
+		t.Fatalf("%d refusals wrote %d audit lines, more than %d", 2*flood, n, server.QuietLines)
+	}
+
+	// A megabyte of name is not a line at all, and not a megabyte of log.
+	size := func() int64 {
+		st, err := os.Stat(e.dir.AuditPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Size()
+	}
+	was := size()
+	big := m.EnrolRequest("no-token")
+	big.Name = strings.Repeat("n", 900<<10)
+	wantHTTP(t, e.client.Post(vaultproto.PathEnrol, big, new(vaultproto.EnrolChallenge)), 400, "name")
+	esc := m.EnrolRequest("no-token")
+	esc.Label = "\x1b[2Jroot"
+	wantHTTP(t, e.client.Post(vaultproto.PathEnrol, esc, new(vaultproto.EnrolChallenge)), 400, "label")
+	if grown := size() - was; grown > 4096 {
+		t.Fatalf("a megabyte of name grew the audit log by %d bytes", grown)
+	}
+
+	// The window over, the next request has what was left out written as one line,
+	// and the machine's release still goes through.
+	e.clock.Advance(server.QuietWindow)
+	wantStatus(t, e.release(m), vaultproto.StatusReleased, "")
+	var counted bool
+	for _, l := range e.auditLines() {
+		if l.Event == "refused" && strings.Contains(l.Detail, "more requests refused before authentication") {
+			counted = true
+		}
+	}
+	if !counted {
+		t.Fatal("what was left out is not in the log as a count")
 	}
 }

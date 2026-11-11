@@ -16,9 +16,14 @@
 //     approval carries the pepper. It is kept in memory with the request,
 //     passed on once in the releasing answer, and wiped: never written,
 //     never logged;
-//   - MaxFailures failed verifications in a row lock the device until an
-//     operator unlocks it;
-//   - at most RateLimit challenges per device per RateWindow;
+//   - MaxFailures verified quotes in a row that the release refuses (a revoked
+//     generation, no approval of the quoted state) lock the device until an
+//     operator unlocks it; a request whose quote the device's attestation key
+//     did not sign is denied and changes nothing of the device;
+//   - at most RateLimit challenges per device and, by default, 3 per address
+//     (the configuration's challenge_rate) per RateWindow;
+//   - what is refused before anyone is authenticated is audited in bounded
+//     number (QuietLines per QuietWindow, the rest as a count);
 //   - the highest verified generation is kept, a lower one is refused;
 //   - nothing is released unless the quote establishes Secure Boot on (PCR 7 and its
 //     events replayed): off, Setup Mode and not established, a selection without
@@ -41,6 +46,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -65,6 +71,21 @@ const (
 	RateWindow   = time.Minute
 	RetryAfter   = 5 // seconds, for a pending request
 	MaxBody      = 1 << 20
+
+	// What is refused before anyone is authenticated is written to the audit
+	// log QuietLines times per QuietWindow, each kind once per address; the rest
+	// is counted and written as one line. Whoever can reach the vault cannot fill
+	// its log, and so cannot stop its releases, which need their line written.
+	QuietWindow = time.Minute
+	QuietLines  = 20
+
+	// An audit entry's fields are cut to these sizes whatever a caller passes.
+	auditFieldMax  = 128
+	auditDetailMax = 512
+
+	// lowSpace is the free space of the state's volume below which the vault
+	// says so: a release fails when its audit line cannot be written.
+	lowSpace = 64 << 20
 )
 
 // DeviceKeys makes a machine's key K_dev: the vault's master's HMAC of its device ID
@@ -106,6 +127,8 @@ type Server struct {
 	requests map[string]*request
 	layouts  map[string]*shown // by request ID
 	rate     map[string][]time.Time
+	addrRate map[string][]time.Time // challenges per remote address
+	quiet    quietLog
 
 	authFails map[string][]time.Time // failed operator authentications per remote address
 }
@@ -179,6 +202,7 @@ func New(o Options) *Server {
 		requests: map[string]*request{},
 		layouts:  map[string]*shown{},
 		rate:     map[string][]time.Time{},
+		addrRate: map[string][]time.Time{},
 
 		authFails: map[string][]time.Time{},
 	}
@@ -303,11 +327,106 @@ func TokenHash(token string) []byte {
 }
 
 func (s *Server) logAudit(e state.Entry) error {
+	e.Device, e.Name, e.Request = cut(e.Device, auditFieldMax), cut(e.Name, auditFieldMax), cut(e.Request, auditFieldMax)
+	e.Remote, e.Actor, e.Result = cut(e.Remote, auditFieldMax), cut(e.Actor, auditFieldMax), cut(e.Result, auditFieldMax)
+	e.Detail = cut(e.Detail, auditDetailMax)
 	if err := s.audit.Log(e); err != nil {
 		s.log.Printf("audit log: %v", err)
 		return err
 	}
 	return nil
+}
+
+// cut bounds a field of an audit entry.
+func cut(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// hostOf is a remote address without its port: what a limit per address counts.
+func hostOf(remote string) string {
+	if h, _, err := net.SplitHostPort(remote); err == nil {
+		return h
+	}
+	return remote
+}
+
+// quietLog is the window of what was refused before authentication.
+type quietLog struct {
+	start   time.Time
+	seen    map[string]struct{} // address, event and detail of the lines written
+	dropped int
+}
+
+// quietAudit logs a refusal of a request nobody authenticated: the first of its
+// kind from an address in the window, QuietLines in all. What is beyond that is
+// counted and written as one line when the window ends (closeQuiet).
+func (s *Server) quietAudit(e state.Entry, now time.Time) error {
+	if err := s.closeQuiet(now); err != nil {
+		return err
+	}
+	q := &s.quiet
+	key := hostOf(e.Remote) + "|" + e.Event + "|" + e.Detail
+	if _, dup := q.seen[key]; dup || len(q.seen) >= QuietLines {
+		q.dropped++
+		return nil
+	}
+	if q.seen == nil {
+		q.seen = map[string]struct{}{}
+		q.start = now
+	}
+	q.seen[key] = struct{}{}
+	return s.logAudit(e)
+}
+
+// closeQuiet ends a window that is over and writes what it left out.
+func (s *Server) closeQuiet(now time.Time) error {
+	q := &s.quiet
+	if q.seen == nil || now.Sub(q.start) < QuietWindow {
+		return nil
+	}
+	dropped := q.dropped
+	*q = quietLog{}
+	s.warnLowSpace()
+	if dropped == 0 {
+		return nil
+	}
+	return s.logAudit(state.Entry{Event: "refused", Result: "refused", Detail: fmt.Sprintf("%d more requests refused before authentication within %s, not listed", dropped, QuietWindow)})
+}
+
+// warnLowSpace says in the vault's log that the state's volume is nearly full.
+func (s *Server) warnLowSpace() {
+	if free, err := s.dir.FreeBytes(); err == nil && free < lowSpace {
+		s.log.Printf("the state directory's volume has %d MiB left: a release fails when its audit line cannot be written", free>>20)
+	}
+}
+
+// challengeRate is the challenges one address gets per RateWindow.
+func (s *Server) challengeRate() int {
+	if s.cfg != nil && s.cfg.ChallengeRate > 0 {
+		return s.cfg.ChallengeRate
+	}
+	return state.DefaultChallengeRate
+}
+
+// addressAllowed counts a challenge for remote's address and says whether it is
+// within the address's limit.
+func (s *Server) addressAllowed(remote string, now time.Time) bool {
+	host := hostOf(remote)
+	window := s.addrRate[host][:0]
+	for _, t := range s.addrRate[host] {
+		if now.Sub(t) < RateWindow {
+			window = append(window, t)
+		}
+	}
+	if len(window) >= s.challengeRate() {
+		s.addrRate[host] = window
+		return false
+	}
+	s.addrRate[host] = append(window, now)
+	return true
 }
 
 // ── enrolment ────────────────────────────────────────────────────────────
@@ -326,7 +445,21 @@ func (s *Server) enrol(req *vaultproto.EnrolRequest, remote string) (*vaultproto
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
+	// Before anything of the request is written anywhere: its sender is nobody
+	// yet, and the name, the label and the ID are as long as it liked.
+	if len(req.DeviceID) != vaultproto.DeviceIDSize {
+		if err := s.quietAudit(state.Entry{Event: "enrol", Remote: remote, Result: "refused", Detail: "no device ID"}, now); err != nil {
+			return nil, err
+		}
+		return nil, fail(http.StatusBadRequest, "a device ID has %d bytes", vaultproto.DeviceIDSize)
+	}
 	dev := hex.EncodeToString(req.DeviceID)
+	if err := req.CheckNames(); err != nil {
+		if err := s.quietAudit(state.Entry{Event: "enrol", Device: dev, Remote: remote, Result: "refused", Detail: "a name or label the vault does not take"}, now); err != nil {
+			return nil, err
+		}
+		return nil, fail(http.StatusBadRequest, "the enrolment request: %v", err)
+	}
 	refuse := func(code int, msg string) error {
 		if err := s.logAudit(state.Entry{Event: "enrol", Device: dev, Name: req.Name, Remote: remote, Result: "refused", Detail: msg}); err != nil {
 			return err
@@ -337,7 +470,11 @@ func (s *Server) enrol(req *vaultproto.EnrolRequest, remote string) (*vaultproto
 	th := TokenHash(req.Token)
 	tok, err := s.dir.Token(th)
 	if errors.Is(err, state.ErrNotFound) {
-		return nil, refuse(http.StatusForbidden, "the token is unknown or used")
+		// No token: still nobody. One line per address and window.
+		if err := s.quietAudit(state.Entry{Event: "enrol", Device: dev, Name: req.Name, Remote: remote, Result: "refused", Detail: "the token is unknown or used"}, now); err != nil {
+			return nil, err
+		}
+		return nil, fail(http.StatusForbidden, "the token is unknown or used")
 	} else if err != nil {
 		return nil, err
 	}
@@ -519,16 +656,24 @@ func (s *Server) challenge(c *vaultproto.ChallengeRequest, remote string) (*vaul
 		return nil, fail(http.StatusBadRequest, "a device ID has %d bytes", vaultproto.DeviceIDSize)
 	}
 	dev := hex.EncodeToString(c.DeviceID)
+	s.sweep(now)
+	// The address first: one that asks too often does not count against a
+	// device, whose ID is all it needs to know.
+	if !s.addressAllowed(remote, now) {
+		if err := s.quietAudit(state.Entry{Event: "challenge", Device: dev, Remote: remote, Result: "refused", Detail: "rate limit of the address"}, now); err != nil {
+			return nil, err
+		}
+		return nil, fail(http.StatusTooManyRequests, "at most %d challenges per address per minute", s.challengeRate())
+	}
 	d, err := s.dir.Device(c.DeviceID)
 	if errors.Is(err, state.ErrNotFound) {
-		if err := s.logAudit(state.Entry{Event: "challenge", Device: dev, Remote: remote, Result: "refused", Detail: "unknown device"}); err != nil {
+		if err := s.quietAudit(state.Entry{Event: "challenge", Device: dev, Remote: remote, Result: "refused", Detail: "unknown device"}, now); err != nil {
 			return nil, err
 		}
 		return nil, fail(http.StatusNotFound, "unknown device")
 	} else if err != nil {
 		return nil, err
 	}
-	s.sweep(now)
 
 	window := s.rate[dev][:0]
 	for _, t := range s.rate[dev] {
@@ -538,7 +683,7 @@ func (s *Server) challenge(c *vaultproto.ChallengeRequest, remote string) (*vaul
 	}
 	if len(window) >= RateLimit {
 		s.rate[dev] = window
-		if err := s.logAudit(state.Entry{Event: "challenge", Device: dev, Name: d.Name, Remote: remote, Result: "refused", Detail: "rate limit"}); err != nil {
+		if err := s.quietAudit(state.Entry{Event: "challenge", Device: dev, Name: d.Name, Remote: remote, Result: "refused", Detail: "rate limit"}, now); err != nil {
 			return nil, err
 		}
 		return nil, fail(http.StatusTooManyRequests, "at most %d challenges per device per minute", RateLimit)
@@ -556,6 +701,14 @@ func (s *Server) challenge(c *vaultproto.ChallengeRequest, remote string) (*vaul
 // sweep forgets enrolments and requests well past their end. One past its
 // end only shortly is still answered (denied, the challenge expired).
 func (s *Server) sweep(now time.Time) {
+	for host, ts := range s.addrRate {
+		if len(ts) == 0 || now.Sub(ts[len(ts)-1]) >= RateWindow {
+			delete(s.addrRate, host)
+		}
+	}
+	if err := s.closeQuiet(now); err != nil {
+		s.log.Printf("audit log: %v", err)
+	}
 	for id, e := range s.enrols {
 		if now.Sub(e.expires) > EnrolTTL {
 			delete(s.enrols, id)
@@ -664,6 +817,14 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		}
 	}
 	if verr != nil {
+		entry.Event = "verify"
+		if checked == nil {
+			// Not the device's quote: its attestation key signed nothing here, so
+			// whoever sent this is nobody, and nothing of the device changes. A
+			// device ID is no secret, and a lock for garbage sent under it would
+			// be anyone's to set.
+			return deny(verr.Error())
+		}
 		d.Failures++
 		reason := verr.Error()
 		if d.Failures >= MaxFailures {
@@ -673,7 +834,6 @@ func (s *Server) release(req *vaultproto.ReleaseRequest, remote string) (*vaultp
 		if err := s.dir.SaveDevice(d); err != nil {
 			return nil, err
 		}
-		entry.Event = "verify"
 		return deny(reason)
 	}
 	if d.Failures != 0 {

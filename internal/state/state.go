@@ -56,7 +56,16 @@ type Config struct {
 	// OperatorListen is the operator interface's HTTPS address, e.g.
 	// ":8444"; empty: off.
 	OperatorListen string `json:"operator_listen,omitempty"`
+
+	// ChallengeRate is how many challenges one address gets per minute; 0: the
+	// default, DefaultChallengeRate. A boot asks for one per keyslot of the
+	// vault's; machines behind one address share it.
+	ChallengeRate int `json:"challenge_rate,omitempty"`
 }
+
+// DefaultChallengeRate is the challenges one address gets per minute unless the
+// configuration says otherwise.
+const DefaultChallengeRate = 3
 
 // Device is devices/<id>.json: what the vault pinned of a machine at
 // enrolment, its release state, and its keys.
@@ -146,6 +155,15 @@ func (d Dir) TLSKeyPath() string     { return d.path("tls", "key.pem") }
 func (d Dir) TLSCertPath() string    { return d.path("tls", "cert.pem") }
 func (d Dir) TLSRootPath() string    { return d.path("tls", "ca.pem") }
 func (d Dir) TLSRootKeyPath() string { return d.path("tls", "ca-key.pem") }
+
+// FreeBytes is the space left on the volume the state lies on.
+func (d Dir) FreeBytes() (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(d.path(), &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
 
 // AuditPath is the audit log.
 func (d Dir) AuditPath() string { return d.path("audit.log") }
