@@ -2,11 +2,14 @@ package vaulttest
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"time"
 
@@ -90,6 +93,7 @@ type TPM struct {
 	defined bool
 	pins    map[string][]byte // by the key's Name
 	masters map[string][]byte // by the master blob's private part
+	roots   map[string]*ecdsa.PrivateKey
 	sign    []byte
 }
 
@@ -97,7 +101,7 @@ type TPM struct {
 func NewTPM() *TPM {
 	s := make([]byte, 32)
 	rand.Read(s)
-	return &TPM{pcrs: map[uint8][]byte{}, pins: map[string][]byte{}, masters: map[string][]byte{}, sign: s}
+	return &TPM{pcrs: map[uint8][]byte{}, pins: map[string][]byte{}, masters: map[string][]byte{}, roots: map[string]*ecdsa.PrivateKey{}, sign: s}
 }
 
 // Extend moves a PCR, as a boot measures.
@@ -234,6 +238,35 @@ func (t *TPM) Derive(master, _ *keys.Blob, _ [][]byte, a *keys.Approval, data []
 		return nil, keys.ErrNotApproved
 	}
 	return hmacOf(m, data), nil
+}
+
+// ImportTLSRoot implements approval.TPM: the root key that follows from master, kept
+// in the clear by its blob's ID.
+func (t *TPM) ImportTLSRoot(master []byte) (*keys.Blob, error) {
+	k, err := keys.TLSRootSoftKey(master)
+	if err != nil {
+		return nil, err
+	}
+	id := make([]byte, 16)
+	rand.Read(id)
+	t.mu.Lock()
+	t.roots[string(id)] = k
+	t.mu.Unlock()
+	return &keys.Blob{Public: tpm2.Marshal(tpm2.New2B(*keys.TLSRootPublic(&k.PublicKey))), Private: id}, nil
+}
+
+// TLSRootSigner implements approval.TPM: only a blob this TPM imported signs.
+func (t *TPM) TLSRootSigner(b *keys.Blob) (crypto.Signer, error) {
+	if _, err := keys.TLSRootPublicKey(b); err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	k, ok := t.roots[string(b.Private)]
+	if !ok {
+		return nil, errors.New("the TLS root key: loading the object (is this the TPM it was made in?)")
+	}
+	return k, nil
 }
 
 // Masters is how many masters it holds, by their blobs' IDs (hex): a restore adds one.

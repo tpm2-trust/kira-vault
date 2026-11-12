@@ -66,6 +66,11 @@ or `{"pepper":"…"}`), `POST /v1/requests/{id}/deny`, `GET /v1/devices` and
 `GET /v1/devices/{id}`, nothing else, over TLS with the vault's own root
 (`tls root`), which machines and operators verify the vault against.
 
+No TLS private key is a file: the root's key - the pin's - follows from the master and
+is in the vault's TPM beside it, and the leaf's key is made in memory at every start. A
+copy or a backup of the state directory cannot play the vault, and a restore of the
+master's backup keeps the pin (kira's `docs/VAULT.md`, §6.2).
+
 A keyslot enrolled with `--keyboard-pepper` takes a pepper of the person's that no device keeps: with
 every release the vault sends a seed for that boot, wrapped for the machine's TPM, and shows its
 one-time keyboard layout, in `kira-vault requests` (a request in state `released`) and in

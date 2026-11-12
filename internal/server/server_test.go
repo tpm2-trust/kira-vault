@@ -3,6 +3,9 @@ package server_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -51,10 +54,14 @@ func newEnv(t *testing.T) *env {
 	if err := e.dir.Create(); err != nil {
 		t.Fatal(err)
 	}
-	if err := tlsutil.Write(e.dir, "127.0.0.1", time.Now()); err != nil {
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
 		t.Fatal(err)
 	}
-	certs, err := tlsutil.Load(e.dir, time.Now)
+	if err := tlsutil.Write(e.dir, rootKey, "127.0.0.1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	certs, err := tlsutil.Load(e.dir, rootKey, "127.0.0.1", time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +221,7 @@ func TestEnrolAndRelease(t *testing.T) {
 	}
 
 	// Files are 0600.
-	for _, p := range []string{e.dir.AuditPath(), e.dir.TLSKeyPath(), e.dir.Path + "/devices/" + state.DeviceFile(m.DeviceID)} {
+	for _, p := range []string{e.dir.AuditPath(), e.dir.TLSCertPath(), e.dir.Path + "/devices/" + state.DeviceFile(m.DeviceID)} {
 		st, err := os.Stat(p)
 		if err != nil || st.Mode().Perm() != 0o600 {
 			t.Fatalf("%s: %v %v", p, st.Mode(), err)

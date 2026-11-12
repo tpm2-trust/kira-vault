@@ -3,8 +3,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tpm2-trust/kira/core/vaultproto"
 
@@ -90,5 +97,40 @@ func TestControlOnSWTPM(t *testing.T) {
 	}
 	if out := look(); strings.Contains(out, "due") {
 		t.Fatalf("control after the approval:\n%s", out)
+	}
+}
+
+// The TLS root key is in the vault's TPM alone: the state directory holds no private
+// key, and beside another TPM - a copy of it, a backup - it does not serve. The
+// master's backup restores the key with the master: the pin holds (TestVaultOnSWTPM
+// releases to the machines' unchanged pin after its restore).
+func TestStateDirectoryAloneDoesNotServe(t *testing.T) {
+	v := initVault(t, "--tpm", vaulttest.StartSWTPM(t), "--pcrs", "23")
+	filepath.WalkDir(v.dir, func(path string, e fs.DirEntry, err error) error {
+		if err == nil && !e.IsDir() {
+			if b, _ := os.ReadFile(path); bytes.Contains(b, []byte("PRIVATE KEY")) {
+				t.Errorf("%s holds a private key", path)
+			}
+		}
+		return nil
+	})
+	for _, name := range []string{"key.pem", "ca-key.pem"} {
+		if _, err := os.Stat(filepath.Join(v.dir, "tls", name)); err == nil {
+			t.Errorf("tls/%s exists", name)
+		}
+	}
+	d := state.Dir{Path: v.dir}
+	cfg, err := d.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.TPM = vaulttest.StartSWTPM(t)
+	if err := d.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := serve(ctx, d, io.Discard, nil); err == nil || !strings.Contains(err.Error(), "the TLS root key") {
+		t.Fatalf("serve beside another TPM: %v", err)
 	}
 }

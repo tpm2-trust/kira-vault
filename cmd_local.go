@@ -126,10 +126,14 @@ func cmdInit(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	now := time.Now()
-	if err := tlsutil.Write(d, u.Hostname(), now); err != nil {
+	root, err := t.TLSRootSigner(&m.TLSRoot)
+	if err != nil {
 		return err
 	}
-	certs, err := tlsutil.Load(d, func() time.Time { return now })
+	if err := tlsutil.Write(d, root, u.Hostname(), now); err != nil {
+		return err
+	}
+	certs, err := tlsutil.Load(d, root, u.Hostname(), func() time.Time { return now })
 	if err != nil {
 		return err
 	}
@@ -219,6 +223,11 @@ func makeKeys(t approval.TPM, master, pin []byte, pcrs []uint8) (*state.Master, 
 		return nil, nil, err
 	}
 	m.Master = *mb
+	rb, err := t.ImportTLSRoot(master)
+	if err != nil {
+		return nil, nil, err
+	}
+	m.TLSRoot = *rb
 	a, err := t.Approve(key, names, pin, pcrs)
 	if err != nil {
 		return nil, nil, err
@@ -311,7 +320,19 @@ func serve(ctx context.Context, d state.Dir, stderr io.Writer, ready chan<- stru
 	if err != nil {
 		return err
 	}
-	certs, err := tlsutil.Load(d, time.Now)
+	m, err := d.Master()
+	if err != nil {
+		return err
+	}
+	root, err := newTPM(cfg.TPM).TLSRootSigner(&m.TLSRoot)
+	if err != nil {
+		return fmt.Errorf("%w (a state directory of an earlier version: make it again with init)", err)
+	}
+	host, err := urlHost(cfg.URL)
+	if err != nil {
+		return err
+	}
+	certs, err := tlsutil.Load(d, root, host, time.Now)
 	if err != nil {
 		return err
 	}
@@ -613,4 +634,13 @@ func version() string {
 		rev += "+dirty"
 	}
 	return rev
+}
+
+// urlHost is the host of the vault's URL: what its TLS leaf is for.
+func urlHost(vaultURL string) (string, error) {
+	u, err := url.Parse(vaultURL)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("the vault's URL %q has no host", vaultURL)
+	}
+	return u.Hostname(), nil
 }

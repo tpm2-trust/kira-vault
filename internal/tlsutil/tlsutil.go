@@ -1,18 +1,25 @@
 // Package tlsutil makes and serves the vault's TLS: a root of its own and a
 // leaf it signs, and the client's side of it.
 //
-// The root (ECDSA P-256, 20 years) is the vault's identity: machines and
-// operators verify the vault's chain against it, and the pin a machine
-// keeps (vaultproto.PinOf) is its key. The leaf (1 year, the vault's host
-// name or address) is what the vault serves, with the root; it is made
-// again from the root once fewer than renewBefore are left - at start and
-// while serving - so that a vault running for a year goes on being
-// verified, without a machine enrolling again.
+// The root (20 years) is the vault's identity: machines and operators verify
+// the vault's chain against it, and the pin a machine keeps
+// (vaultproto.PinOf) is its key. That key is in the vault's TPM
+// (keys.ImportTLSRoot: derived from the master, so a restore keeps the pin)
+// and signs through a crypto.Signer; only the root's certificate is a file.
+//
+// The leaf (90 days, the vault's host name or address) is what the vault
+// serves, with the root. Its key is Ed25519, made in memory at every start
+// and at every renewal, and never written: no TLS private key is in the
+// state directory or a backup of it. The leaf is made again once fewer than
+// renewBefore are left, so that a vault that runs for years goes on being
+// verified, without a machine enrolling again. Its certificate is written
+// (tls/cert.pem) for 'control' to show.
 package tlsutil
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"bytes"
+	"crypto"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -34,17 +41,14 @@ import (
 
 const (
 	rootValidity = 20 // years
-	leafValidity = 1  // year
+	leafValidity = 90 * 24 * time.Hour
 	// renewBefore: a leaf with less left is made again from the root.
 	renewBefore = 30 * 24 * time.Hour
 )
 
-// Write makes the vault's root and a leaf for host in the state directory.
-func Write(d state.Dir, host string, now time.Time) error {
-	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return err
-	}
+// Write makes the vault's root certificate for host in the state directory,
+// signed by rootKey: the root key in the vault's TPM.
+func Write(d state.Dir, rootKey crypto.Signer, host string, now time.Time) error {
 	serial, err := newSerial()
 	if err != nil {
 		return err
@@ -59,31 +63,17 @@ func Write(d state.Dir, host string, now time.Time) error {
 		IsCA:                  true,
 		MaxPathLenZero:        true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &rootKey.PublicKey, rootKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, rootKey.Public(), rootKey)
 	if err != nil {
-		return err
+		return fmt.Errorf("signing the vault's root: %w", err)
 	}
-	root, err := x509.ParseCertificate(der)
-	if err != nil {
-		return err
-	}
-	kder, err := x509.MarshalECPrivateKey(rootKey)
-	if err != nil {
-		return err
-	}
-	if err := state.WriteFile(d.TLSRootKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})); err != nil {
-		return err
-	}
-	if err := state.WriteFile(d.TLSRootPath(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
-		return err
-	}
-	_, err = writeLeaf(d, root, rootKey, host, now)
-	return err
+	return state.WriteFile(d.TLSRootPath(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
-// writeLeaf makes a leaf for host, signed by the root, and stores it.
-func writeLeaf(d state.Dir, root *x509.Certificate, rootKey *ecdsa.PrivateKey, host string, now time.Time) (*tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+// newLeaf makes a leaf for host with a key of its own, in memory, signed by
+// the root; its certificate alone is stored.
+func newLeaf(d state.Dir, root *x509.Certificate, rootKey crypto.Signer, host string, now time.Time) (*tls.Certificate, error) {
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +85,7 @@ func writeLeaf(d state.Dir, root *x509.Certificate, rootKey *ecdsa.PrivateKey, h
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
 		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.AddDate(leafValidity, 0, 0),
+		NotAfter:     now.Add(leafValidity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -104,16 +94,9 @@ func writeLeaf(d state.Dir, root *x509.Certificate, rootKey *ecdsa.PrivateKey, h
 	} else {
 		tmpl.DNSNames = []string{host}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, root, &key.PublicKey, rootKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, root, pub, rootKey)
 	if err != nil {
-		return nil, err
-	}
-	kder, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return nil, err
-	}
-	if err := state.WriteFile(d.TLSKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("signing the TLS leaf: %w", err)
 	}
 	if err := state.WriteFile(d.TLSCertPath(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
 		return nil, err
@@ -129,50 +112,39 @@ func newSerial() (*big.Int, error) {
 	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 }
 
-// Certs is the vault's TLS as it serves it: the root, its key, and the
-// leaf, made again when it is due.
+// Certs is the vault's TLS as it serves it: the root, the signer of its key,
+// and the leaf, made again when it is due.
 type Certs struct {
 	d       state.Dir
 	root    *x509.Certificate
-	rootKey *ecdsa.PrivateKey
+	rootKey crypto.Signer
+	host    string
 	now     func() time.Time
 
 	mu   sync.Mutex
 	leaf *tls.Certificate
 }
 
-// Load reads the vault's TLS from the state directory and makes the leaf
-// again when it is due (Renew).
-func Load(d state.Dir, now func() time.Time) (*Certs, error) {
+// Load reads the vault's root from the state directory and makes a leaf for
+// host with a new key. rootKey must be the key the root certifies: a state
+// directory under another TPM's key, or another master's, does not serve.
+func Load(d state.Dir, rootKey crypto.Signer, host string, now func() time.Time) (*Certs, error) {
 	root, err := readCert(d.TLSRootPath())
 	if err != nil {
 		return nil, fmt.Errorf("the vault's root: %w (a state directory of an earlier version: make it again with init)", err)
 	}
-	b, err := os.ReadFile(d.TLSRootKeyPath())
+	spki, err := x509.MarshalPKIXPublicKey(rootKey.Public())
 	if err != nil {
 		return nil, fmt.Errorf("the vault's root key: %w", err)
 	}
-	blk, _ := pem.Decode(b)
-	if blk == nil {
-		return nil, errors.New("the vault's root key is not PEM")
+	if !bytes.Equal(spki, root.RawSubjectPublicKeyInfo) {
+		return nil, errors.New("the root key in the TPM is not the key of the vault's root certificate (tls/ca.pem): the state directory and the master do not belong together")
 	}
-	rootKey, err := x509.ParseECPrivateKey(blk.Bytes)
+	leaf, err := newLeaf(d, root, rootKey, host, now())
 	if err != nil {
-		return nil, fmt.Errorf("the vault's root key: %w", err)
-	}
-	cert, err := tls.LoadX509KeyPair(d.TLSCertPath(), d.TLSKeyPath())
-	if err != nil {
-		return nil, fmt.Errorf("the TLS key: %w", err)
-	}
-	if cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
 		return nil, err
 	}
-	cert.Certificate = append(cert.Certificate[:1], root.Raw)
-	c := &Certs{d: d, root: root, rootKey: rootKey, now: now, leaf: &cert}
-	if _, err := c.Renew(); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return &Certs{d: d, root: root, rootKey: rootKey, host: host, now: now, leaf: leaf}, nil
 }
 
 func readCert(path string) (*x509.Certificate, error) {
@@ -181,14 +153,14 @@ func readCert(path string) (*x509.Certificate, error) {
 		return nil, err
 	}
 	blk, _ := pem.Decode(b)
-	if blk == nil || blk.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("%s holds no certificate", path)
+	if blk == nil {
+		return nil, errors.New("not PEM")
 	}
 	return x509.ParseCertificate(blk.Bytes)
 }
 
-// Renew makes the leaf again from the root when fewer than renewBefore are
-// left, for the same name or address, and says whether it did.
+// Renew makes the leaf again, with a new key, when fewer than renewBefore
+// are left, and says whether it did.
 func (c *Certs) Renew() (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -196,8 +168,7 @@ func (c *Certs) Renew() (bool, error) {
 	if c.leaf.Leaf.NotAfter.Sub(now) > renewBefore {
 		return false, nil
 	}
-	host := c.leaf.Leaf.Subject.CommonName
-	leaf, err := writeLeaf(c.d, c.root, c.rootKey, host, now)
+	leaf, err := newLeaf(c.d, c.root, c.rootKey, c.host, now)
 	if err != nil {
 		return false, fmt.Errorf("making the TLS leaf again: %w", err)
 	}

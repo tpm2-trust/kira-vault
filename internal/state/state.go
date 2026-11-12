@@ -1,10 +1,10 @@
 // Package state is the vault's state directory: its configuration, the TLS
-// key, the enrolled devices, the enrolment tokens and the audit log.
+// certificates, the enrolled devices, the enrolment tokens and the audit log.
 //
 //	config.json             Config
 //	master.json             Master: the master key as the TPM holds it, the approval keys
 //	approvals/<time>.json   one keys.Approval per approval of the vault's boot state
-//	tls/key.pem, cert.pem   the TLS key and its self-signed certificate
+//	tls/ca.pem, cert.pem    the TLS root and the leaf last served; no key is a file
 //	devices/<id>.json       one Device per enrolled machine (hex device ID)
 //	tokens/<sha256>.json    one Token per unused enrolment token
 //	operators/<name>.json   one Operator per bearer token of the operator interface
@@ -149,12 +149,11 @@ func (d Dir) path(parts ...string) string {
 	return filepath.Join(append([]string{d.Path}, parts...)...)
 }
 
-// TLSKeyPath and TLSCertPath are the TLS leaf's key and certificate,
-// TLSRootPath and TLSRootKeyPath the root's that signs it (PEM).
-func (d Dir) TLSKeyPath() string     { return d.path("tls", "key.pem") }
-func (d Dir) TLSCertPath() string    { return d.path("tls", "cert.pem") }
-func (d Dir) TLSRootPath() string    { return d.path("tls", "ca.pem") }
-func (d Dir) TLSRootKeyPath() string { return d.path("tls", "ca-key.pem") }
+// TLSCertPath is the TLS leaf's certificate as it was last made, TLSRootPath
+// the root's that signs it (PEM). Neither key is a file: the root's is in the
+// TPM (Master.TLSRoot), the leaf's in serve's memory.
+func (d Dir) TLSCertPath() string { return d.path("tls", "cert.pem") }
+func (d Dir) TLSRootPath() string { return d.path("tls", "ca.pem") }
 
 // FreeBytes is the space left on the volume the state lies on.
 func (d Dir) FreeBytes() (uint64, error) {
@@ -232,7 +231,10 @@ type ApprovalKey struct {
 // Master is master.json: the master key as its TPM holds it, imported under the
 // policy of the approval keys, in their order (the policy's PolicyOR).
 type Master struct {
-	Master       keys.Blob     `json:"master"`
+	Master keys.Blob `json:"master"`
+	// TLSRoot is the TLS root key as the TPM holds it: derived from the master,
+	// imported beside it (keys.ImportTLSRoot). No TLS key is a file.
+	TLSRoot      keys.Blob     `json:"tls_root"`
 	ApprovalKeys []ApprovalKey `json:"approval_keys"`
 }
 
