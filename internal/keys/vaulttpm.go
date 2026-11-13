@@ -76,15 +76,22 @@ func (t *TPM) ImportMaster(master, authPolicy []byte) (*Blob, error) {
 	if err != nil {
 		return nil, err
 	}
-	name, err := tpm2.ObjectName(pub)
-	if err != nil {
-		return nil, err
-	}
 	sens, err := masterSensitive(master)
 	if err != nil {
 		return nil, err
 	}
 	defer Wipe(sens)
+	return t.importObject(pub, sens, "the master")
+}
+
+// importObject imports an object made outside the TPM under the storage primary: its
+// sensitive area sens wrapped for the primary's public key (an outer wrapper, its
+// seed encapsulated to that key).
+func (t *TPM) importObject(pub *tpm2.TPMTPublic, sens []byte, what string) (*Blob, error) {
+	name, err := tpm2.ObjectName(pub)
+	if err != nil {
+		return nil, err
+	}
 	var blob *Blob
 	err = t.with(func(tp transport.TPM, srk *primary) error {
 		ek, err := tpm2.ImportEncapsulationKey(&srk.public)
@@ -93,7 +100,7 @@ func (t *TPM) ImportMaster(master, authPolicy []byte) (*Blob, error) {
 		}
 		dup, seed, err := tpm2.CreateDuplicate(rand.Reader, ek, name.Buffer, sens)
 		if err != nil {
-			return fmt.Errorf("wrapping the master for the TPM: %w", err)
+			return fmt.Errorf("wrapping %s for the TPM: %w", what, err)
 		}
 		rsp, err := tpm2.Import{
 			ParentHandle: tpm2.AuthHandle{Handle: srk.handle, Name: srk.name, Auth: tpm2.PasswordAuth(nil)},
@@ -103,7 +110,7 @@ func (t *TPM) ImportMaster(master, authPolicy []byte) (*Blob, error) {
 			Symmetric:    tpm2.TPMTSymDef{Algorithm: tpm2.TPMAlgNull},
 		}.Execute(tp)
 		if err != nil {
-			return fmt.Errorf("importing the master: %w", err)
+			return fmt.Errorf("importing %s: %w", what, err)
 		}
 		blob = &Blob{Public: tpm2.Marshal(tpm2.New2B(*pub)), Private: tpm2.Marshal(rsp.OutPrivate)}
 		return nil

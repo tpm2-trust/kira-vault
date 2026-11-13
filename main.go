@@ -29,11 +29,13 @@ Usage:
   kira-vault control [--dir DIR] [--socket PATH] [--lines] [--debug]
   kira-vault init   [--dir DIR] [--listen :8443] [--url https://HOST:8443] [--pcrs 7,15] [--tpm /dev/tpmrm0]
                          [--admin-socket PATH] [--operator-listen :8444]
+                         [--challenge-rate 3]
   kira-vault init --restore [--dir DIR]
   kira-vault approve   [--dir DIR]
   kira-vault approvals [--dir DIR]
   kira-vault backup check [--dir DIR]
   kira-vault config set operator-listen ADDR|""   [--dir DIR]
+  kira-vault config set challenge-rate N           [--dir DIR]
   kira-vault serve  [--dir DIR]
   kira-vault tls root [--dir DIR]
   kira-vault status

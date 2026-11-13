@@ -4,6 +4,7 @@ package approval
 
 import (
 	"bytes"
+	"crypto"
 	"errors"
 	"fmt"
 
@@ -18,6 +19,10 @@ type TPM interface {
 	CreateApprovalKey(pin []byte) (*keys.Blob, error)
 	DefineCounter(keyNames [][]byte) error
 	ImportMaster(master, authPolicy []byte) (*keys.Blob, error)
+	// ImportTLSRoot imports the TLS root key that follows from master;
+	// TLSRootSigner signs with it (keys/tlsroot.go).
+	ImportTLSRoot(master []byte) (*keys.Blob, error)
+	TLSRootSigner(b *keys.Blob) (crypto.Signer, error)
 	Approve(key *keys.Blob, keyNames [][]byte, pin []byte, pcrs []uint8) (*keys.Approval, error)
 	Derive(master, key *keys.Blob, keyNames [][]byte, a *keys.Approval, data []byte) ([]byte, error)
 }

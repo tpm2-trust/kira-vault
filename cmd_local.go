@@ -45,6 +45,7 @@ func cmdInit(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	tpmPath := fs.String("tpm", state.DefaultTPM, "the vault's TPM")
 	sock := fs.String("admin-socket", state.DefaultAdminSocket, "the admin interface's Unix socket")
 	opListen := fs.String("operator-listen", "", "the operator interface's HTTPS address (default: off)")
+	challengeRate := fs.Int("challenge-rate", 0, fmt.Sprintf("challenges one address gets per minute (default: %d)", state.DefaultChallengeRate))
 	restore := fs.Bool("restore", false, "restore the master from its backup into this TPM, in a state directory restored from a backup")
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -125,15 +126,22 @@ func cmdInit(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	now := time.Now()
-	if err := tlsutil.Write(d, u.Hostname(), now); err != nil {
+	root, err := t.TLSRootSigner(&m.TLSRoot)
+	if err != nil {
 		return err
 	}
-	certs, err := tlsutil.Load(d, func() time.Time { return now })
+	if err := tlsutil.Write(d, root, u.Hostname(), now); err != nil {
+		return err
+	}
+	certs, err := tlsutil.Load(d, root, u.Hostname(), func() time.Time { return now })
 	if err != nil {
 		return err
 	}
 	pinTLS := certs.Pin()
-	cfg := &state.Config{Listen: *listen, URL: *pubURL, PCRs: pcrs, TPM: *tpmPath, AdminSocket: *sock, OperatorListen: *opListen}
+	cfg := &state.Config{Listen: *listen, URL: *pubURL, PCRs: pcrs, TPM: *tpmPath, AdminSocket: *sock, OperatorListen: *opListen, ChallengeRate: *challengeRate}
+	if cfg.ChallengeRate < 0 {
+		return errors.New("--challenge-rate: a number of challenges per minute, 0 for the default")
+	}
 	if err := d.SaveMaster(m); err != nil {
 		return err
 	}
@@ -215,6 +223,11 @@ func makeKeys(t approval.TPM, master, pin []byte, pcrs []uint8) (*state.Master, 
 		return nil, nil, err
 	}
 	m.Master = *mb
+	rb, err := t.ImportTLSRoot(master)
+	if err != nil {
+		return nil, nil, err
+	}
+	m.TLSRoot = *rb
 	a, err := t.Approve(key, names, pin, pcrs)
 	if err != nil {
 		return nil, nil, err
@@ -307,7 +320,19 @@ func serve(ctx context.Context, d state.Dir, stderr io.Writer, ready chan<- stru
 	if err != nil {
 		return err
 	}
-	certs, err := tlsutil.Load(d, time.Now)
+	m, err := d.Master()
+	if err != nil {
+		return err
+	}
+	root, err := newTPM(cfg.TPM).TLSRootSigner(&m.TLSRoot)
+	if err != nil {
+		return fmt.Errorf("%w (a state directory of an earlier version: make it again with init)", err)
+	}
+	host, err := urlHost(cfg.URL)
+	if err != nil {
+		return err
+	}
+	certs, err := tlsutil.Load(d, root, host, time.Now)
 	if err != nil {
 		return err
 	}
@@ -477,10 +502,13 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) != 3 || pos[0] != "set" || pos[1] != "operator-listen" {
-		return errors.New(`usage: kira-vault config set operator-listen ADDR|""`)
+	if len(pos) != 3 || pos[0] != "set" || (pos[1] != "operator-listen" && pos[1] != "challenge-rate") {
+		return errors.New(`usage: kira-vault config set operator-listen ADDR|"" | challenge-rate N`)
 	}
 	d := state.Dir{Path: *dir}
+	if pos[1] == "challenge-rate" {
+		return setChallengeRate(d, pos[2], stdout)
+	}
 	unlock, err := d.Lock()
 	if err != nil {
 		return err
@@ -505,6 +533,36 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "The operator interface listens on %s (%s) from serve's next start.\n", pos[2], server.OperatorURL(cfg))
 	}
+	return nil
+}
+
+// setChallengeRate sets how many challenges one address gets per minute; 0 is
+// the default again. With serve stopped, as every change of the configuration.
+func setChallengeRate(d state.Dir, value string, stdout io.Writer) error {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 || n > 100000 {
+		return fmt.Errorf("challenge-rate %q: a number of challenges per minute, 0 for the default (%d)", value, state.DefaultChallengeRate)
+	}
+	unlock, err := d.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	cfg, err := d.Config()
+	if err != nil {
+		return err
+	}
+	cfg.ChallengeRate = n
+	if err := d.SaveConfig(cfg); err != nil {
+		return err
+	}
+	if err := logOnce(d, state.Entry{Event: "config", Actor: "admin", Result: "done", Detail: "challenge-rate " + strconv.Itoa(n)}); err != nil {
+		return err
+	}
+	if n == 0 {
+		n = state.DefaultChallengeRate
+	}
+	fmt.Fprintf(stdout, "One address gets %d challenges per minute from serve's next start.\n", n)
 	return nil
 }
 
@@ -576,4 +634,13 @@ func version() string {
 		rev += "+dirty"
 	}
 	return rev
+}
+
+// urlHost is the host of the vault's URL: what its TLS leaf is for.
+func urlHost(vaultURL string) (string, error) {
+	u, err := url.Parse(vaultURL)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("the vault's URL %q has no host", vaultURL)
+	}
+	return u.Hostname(), nil
 }
